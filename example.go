@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winterstein/aiqa/client-go"
+	"github.com/winterwell/aiqa-client-go"
 )
 
 func main() {

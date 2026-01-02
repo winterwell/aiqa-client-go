@@ -1,4 +1,4 @@
-module github.com/winterstein/aiqa/client-go
+module github.com/winterwell/aiqa-client-go
 
 go 1.21
 

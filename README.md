@@ -2,7 +2,7 @@
 
 OpenTelemetry-based client for AIQA that logs traces to the server.
 
-Repository: [https://github.com/winterstein/aiqa](https://github.com/winterstein/aiqa)
+Repository: [https://github.com/winterwell/aiqa-client-go](https://github.com/winterwell/aiqa-client-go)
 
 ## Installation
 
@@ -11,20 +11,20 @@ Repository: [https://github.com/winterstein/aiqa](https://github.com/winterstein
 Add the module to your Go project:
 
 ```bash
-go get github.com/winterstein/aiqa/client-go
+go get github.com/winterwell/aiqa-client-go
 ```
 
 Or specify a version:
 
 ```bash
-go get github.com/winterstein/aiqa/client-go@v0.4.1
+go get github.com/winterwell/aiqa-client-go@v0.4.1
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/winterstein/aiqa.git
-cd aiqa/client-go
+git clone https://github.com/winterwell/aiqa-client-go.git
+cd aiqa-client-go
 go mod download
 ```
 
@@ -48,12 +48,14 @@ package main
 
 import (
     "context"
+    "fmt"
     "time"
-    "github.com/winterstein/aiqa/client-go"
+    "github.com/winterwell/aiqa-client-go"
 )
 
 func main() {
-    // Initialize tracing
+    // Initialize tracing (can also pass serverURL and apiKey as parameters)
+    // Sampling rate can be passed as third parameter (0.0 to 1.0)
     err := aiqa.InitTracing("", "")
     if err != nil {
         panic(err)
@@ -147,6 +149,7 @@ The client can be configured via environment variables or by passing parameters 
 - `AIQA_API_KEY`: API key for authentication (default: empty)
 - `AIQA_COMPONENT_TAG`: Component tag to add to all spans (e.g., "mynamespace.mysystem"). Optional.
 - `AIQA_SAMPLING_RATE`: Sampling rate between 0 and 1 (default: 1.0 = sample all). Optional.
+- `AIQA_DATA_FILTERS`: Comma-separated list of data filters to apply. Default: "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys". Set to "false" to disable all filters. Optional.
 
 ## Flushing Spans
 
@@ -168,10 +171,174 @@ defer cancel()
 aiqa.ShutdownTracing(ctx)
 ```
 
+## Advanced Features
+
+### Getting Trace and Span IDs
+
+You can retrieve the current trace ID and span ID:
+
+```go
+ctx := context.Background()
+traceId := aiqa.GetTraceId(ctx)
+spanId := aiqa.GetSpanId(ctx)
+fmt.Printf("Trace ID: %s, Span ID: %s\n", traceId, spanId)
+```
+
+### Setting Conversation ID
+
+Group multiple traces together that are part of the same conversation:
+
+```go
+ctx := context.Background()
+aiqa.SetConversationId(ctx, "user-session-123")
+```
+
+### Manually Setting Token Usage
+
+If your AI provider doesn't follow standard patterns, you can manually set token usage:
+
+```go
+ctx := context.Background()
+inputTokens := 100
+outputTokens := 50
+totalTokens := 150
+aiqa.SetTokenUsage(ctx, &inputTokens, &outputTokens, &totalTokens)
+```
+
+### Manually Setting Provider and Model
+
+Explicitly set provider and model information:
+
+```go
+ctx := context.Background()
+provider := "openai"
+model := "gpt-4"
+aiqa.SetProviderAndModel(ctx, &provider, &model)
+```
+
+### Continuing Traces Across Services
+
+Create a span that continues from an existing trace ID:
+
+```go
+ctx := context.Background()
+traceId := "abc123..." // 32 character hex string
+parentSpanId := "def456..." // 16 character hex string (optional)
+ctx, span := aiqa.CreateSpanFromTraceId(ctx, traceId, parentSpanId, "my-span-name")
+defer span.End()
+```
+
+### Injecting/Extracting Trace Context
+
+Pass trace context between services via HTTP headers or other carriers:
+
+```go
+// Inject trace context into HTTP headers
+headers := make(map[string]string)
+aiqa.InjectTraceContext(ctx, headers)
+// Now use headers in your HTTP request
+
+// Extract trace context from HTTP headers
+ctx = aiqa.ExtractTraceContext(ctx, headers)
+```
+
+### Getting and Submitting Feedback
+
+Retrieve a span and submit feedback for a trace:
+
+```go
+// Get a span by ID
+ctx := context.Background()
+span, err := aiqa.GetSpan(ctx, "span-id-here", "organisation-id")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Submit feedback for a trace
+thumbsUp := true
+err = aiqa.SubmitFeedback(ctx, "trace-id-here", aiqa.FeedbackOptions{
+    ThumbsUp: &thumbsUp,
+    Comment:  "Great response!",
+})
+```
+
+## Experiment Runner
+
+The `ExperimentRunner` allows you to run experiments on datasets, scoring results against metrics:
+
+```go
+import (
+    "context"
+    "github.com/winterwell/aiqa-client-go"
+)
+
+// Create an experiment runner
+runner := aiqa.NewExperimentRunner(aiqa.ExperimentRunnerOptions{
+    DatasetId:      "dataset-id",
+    ExperimentId:   "", // Optional: will create if empty
+    ServerUrl:      "", // Optional: uses AIQA_SERVER_URL env var
+    ApiKey:         "", // Optional: uses AIQA_API_KEY env var
+    OrganisationId: "", // Optional: required for creating experiments
+})
+
+// Get the dataset
+dataset, err := runner.GetDataset(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Define your engine function
+engine := func(input interface{}, parameters map[string]interface{}) (interface{}, error) {
+    // Your AI logic here
+    return "output", nil
+}
+
+// Optional: define a scorer function
+scorer := func(output interface{}, example aiqa.Example, parameters map[string]interface{}) (map[string]float64, error) {
+    scores := make(map[string]float64)
+    // Calculate scores based on output and example
+    scores["accuracy"] = 0.95
+    return scores, nil
+}
+
+// Run the experiment
+err = runner.Run(ctx, engine, scorer)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Get summary results
+summary, err := runner.GetSummaryResults(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Results: %+v\n", summary)
+```
+
+## Data Filtering
+
+The client automatically filters sensitive data from spans. By default, it removes:
+- Passwords (keys containing "password")
+- JWT tokens (values matching JWT format)
+- Authorization headers
+- API keys (common patterns like "sk-", "ghp_", etc.)
+
+You can configure filters via the `AIQA_DATA_FILTERS` environment variable:
+
+```bash
+# Use default filters
+export AIQA_DATA_FILTERS="RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys"
+
+# Disable all filters
+export AIQA_DATA_FILTERS="false"
+
+# Use only specific filters
+export AIQA_DATA_FILTERS="RemovePasswords, RemoveAPIKeys"
+```
+
 ## Running the Example
 
 ```bash
-cd client-go
 go run example.go
 ```
 
@@ -202,9 +369,9 @@ The client uses semantic versioning. Version information is tracked in:
    ```
 
 3. **Verify the release:**
-   - Check that the tag appears on GitHub: https://github.com/winterstein/aiqa/tags
+   - Check that the tag appears on GitHub: https://github.com/winterwell/aiqa-client-go/tags
    - Go modules will automatically pick up the new version via the Go proxy
-   - Users can then install with: `go get github.com/winterstein/aiqa/client-go@v0.4.2`
+   - Users can then install with: `go get github.com/winterwell/aiqa-client-go@v0.4.2`
 
 ### Version Format
 
@@ -259,5 +426,5 @@ go build
 
 ### Contributing
 
-Contributions are welcome! Please open an issue or pull request on [GitHub](https://github.com/winterstein/aiqa).
+Contributions are welcome! Please open an issue or pull request on [GitHub](https://github.com/winterwell/aiqa-client-go).
 

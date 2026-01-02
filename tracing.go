@@ -267,12 +267,8 @@ func wrapSyncFunction(fnValue reflect.Value, fnType reflect.Type, fnName string,
 			}
 		}
 
-		span := trace.SpanFromContext(ctx)
-		if !span.IsRecording() {
-			ctx, span = tracer.Start(ctx, fnName)
-		} else {
-			ctx, span = tracer.Start(ctx, fnName)
-		}
+		// Start a new span (always create a child span for the traced function)
+		ctx, span := tracer.Start(ctx, fnName)
 		defer span.End()
 
 		// Set component tag if configured
@@ -560,7 +556,7 @@ func applyDataFilters(key string, value interface{}) interface{} {
 	// RemoveAPIKeys filter: if key contains API key patterns or value looks like an API key
 	if enabledFilters["RemoveAPIKeys"] {
 		// Check key patterns
-		apiKeyKeyPatterns := []string{"api_key", "apikey", "api-key", "apikey"}
+		apiKeyKeyPatterns := []string{"api_key", "apikey", "api-key"}
 		for _, pattern := range apiKeyKeyPatterns {
 			if strings.Contains(keyLower, pattern) {
 				return "****"

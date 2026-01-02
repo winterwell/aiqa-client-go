@@ -15,22 +15,19 @@ The Go client uses semantic versioning and follows Go module conventions:
 
 ### 1. Update Version
 
-From the repository root, run the version update script:
+Update the version in `version.json`
 
 ```bash
-# From repo root (not client-go directory)
-./set-version-json.sh
+# Edit version.json to update the VERSION field
+# The version should follow semantic versioning (e.g., "0.4.2")
 ```
 
-This script:
-- Updates `version.json` in `client-go/version.json`
-- Updates version in other components (Python, JS, server, etc.)
-- Uses the version defined at the top of the script
+If you have a version management script in the repository root (e.g., `set-version-json.sh`), you can use that instead. Otherwise, manually update `version.json` with the new version, git commit, and date.
 
 ### 2. Commit Changes
 
 ```bash
-git add version.json client-go/version.json
+git add version.json
 git commit -m "Bump version to v0.4.2"
 ```
 
@@ -55,29 +52,29 @@ git push --tags
 ### 4. Verify Publication
 
 1. **Check GitHub tags:**
-   - Visit: https://github.com/winterstein/aiqa/tags
+   - Visit: https://github.com/winterwell/aiqa-client-go/tags
    - Verify the new tag appears
 
 2. **Test installation:**
    ```bash
    # In a test project
-   go get github.com/winterstein/aiqa/client-go@v0.4.2
+   go get github.com/winterwell/aiqa-client-go@v0.4.2
    ```
 
 3. **Check Go proxy:**
    - The Go proxy (proxy.golang.org) automatically indexes public GitHub repositories
    - It may take a few minutes for the new version to appear
-   - Check: https://pkg.go.dev/github.com/winterstein/aiqa/client-go
+   - Check: https://pkg.go.dev/github.com/winterwell/aiqa-client-go
 
 ## Module Path
 
-**Module path:** `github.com/winterstein/aiqa/client-go`
+**Module path:** `github.com/winterwell/aiqa-client-go`
 
-**Repository location:** `github.com/winterstein/aiqa`
+**Repository location:** `github.com/winterwell/aiqa-client-go`
 
 The module path matches the repository location, so no redirects are needed. Users install with:
 ```bash
-go get github.com/winterstein/aiqa/client-go
+go get github.com/winterwell/aiqa-client-go
 ```
 
 ## Pre-release Versions
@@ -92,7 +89,7 @@ git push origin v0.4.2-alpha.1
 
 Users can install pre-release versions:
 ```bash
-go get github.com/winterstein/aiqa/client-go@v0.4.2-alpha.1
+go get github.com/winterwell/aiqa-client-go@v0.4.2-alpha.1
 ```
 
 ## Major Version Updates
@@ -102,7 +99,7 @@ For major version changes (v1.0.0, v2.0.0, etc.), you may need to:
 1. **Update module path** (for v2+):
    ```go
    // In go.mod
-   module github.com/winterstein/aiqa/client-go/v2
+   module github.com/winterwell/aiqa-client-go/v2
    ```
 
 2. **Update import paths** in the codebase
@@ -118,7 +115,7 @@ See [Go modules documentation](https://go.dev/doc/modules/major-version) for det
 - Wait a few minutes - the Go proxy indexes repositories asynchronously
 - Verify the tag is pushed to GitHub
 - Check that the repository is public
-- Try: `GOPROXY=direct go get github.com/winterstein/aiqa/client-go@v0.4.2`
+- Try: `GOPROXY=direct go get github.com/winterwell/aiqa-client-go@v0.4.2`
 
 ### Module path issues
 
