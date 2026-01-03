@@ -1,12 +1,8 @@
 package aiqa
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -107,7 +103,6 @@ type ExperimentRunner struct {
 		scores  ScoreResult
 	}
 	summaryResults map[string]MetricStats
-	client         *http.Client
 }
 
 // NewExperimentRunner creates a new ExperimentRunner
@@ -131,37 +126,20 @@ func NewExperimentRunner(options ExperimentRunnerOptions) *ExperimentRunner {
 		organisation:   options.OrganisationId,
 		experimentId:   options.ExperimentId,
 		summaryResults: make(map[string]MetricStats),
-		client:         &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 // GetDataset fetches the dataset to get its metrics
 func (er *ExperimentRunner) GetDataset(ctx context.Context) (*Dataset, error) {
 	url := fmt.Sprintf("%s/dataset/%s", er.serverUrl, er.datasetId)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if er.apiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", er.apiKey))
-	}
-
-	resp, err := er.client.Do(req)
+	resp, err := makeRequest(ctx, "GET", url, nil, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch dataset: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to fetch dataset: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-	}
 
 	var dataset Dataset
-	if err := json.NewDecoder(resp.Body).Decode(&dataset); err != nil {
-		return nil, fmt.Errorf("failed to decode dataset: %w", err)
+	if err := parseJSONResponse(resp, &dataset); err != nil {
+		return nil, fmt.Errorf("failed to fetch dataset: %w", err)
 	}
 
 	return &dataset, nil
@@ -173,34 +151,14 @@ func (er *ExperimentRunner) GetExampleInputs(ctx context.Context, limit int) ([]
 		limit = 10000
 	}
 
-	url := fmt.Sprintf("%s/example", er.serverUrl)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	q := req.URL.Query()
-	q.Set("dataset_id", er.datasetId)
+	url := fmt.Sprintf("%s/example?dataset_id=%s&limit=%d", er.serverUrl, er.datasetId, limit)
 	if er.organisation != "" {
-		q.Set("organisation", er.organisation)
-	}
-	q.Set("limit", fmt.Sprintf("%d", limit))
-	req.URL.RawQuery = q.Encode()
-
-	req.Header.Set("Content-Type", "application/json")
-	if er.apiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", er.apiKey))
+		url += fmt.Sprintf("&organisation=%s", er.organisation)
 	}
 
-	resp, err := er.client.Do(req)
+	resp, err := makeRequest(ctx, "GET", url, nil, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch example inputs: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to fetch example inputs: %d %s - %s", resp.StatusCode, resp.Status, string(body))
 	}
 
 	var data struct {
@@ -210,8 +168,8 @@ func (er *ExperimentRunner) GetExampleInputs(ctx context.Context, limit int) ([]
 		Offset int       `json:"offset,omitempty"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode examples: %w", err)
+	if err := parseJSONResponse(resp, &data); err != nil {
+		return nil, fmt.Errorf("failed to fetch example inputs: %w", err)
 	}
 
 	return data.Hits, nil
@@ -242,36 +200,15 @@ func (er *ExperimentRunner) CreateExperiment(ctx context.Context, experimentSetu
 	}
 
 	fmt.Println("AIQA: Creating experiment")
-	jsonData, err := json.Marshal(experimentSetup)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal experiment: %w", err)
-	}
-
 	url := fmt.Sprintf("%s/experiment", er.serverUrl)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if er.apiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", er.apiKey))
-	}
-
-	resp, err := er.client.Do(req)
+	resp, err := makeRequest(ctx, "POST", url, experimentSetup, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create experiment: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to create experiment: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-	}
 
 	var experiment Experiment
-	if err := json.NewDecoder(resp.Body).Decode(&experiment); err != nil {
-		return nil, fmt.Errorf("failed to decode experiment: %w", err)
+	if err := parseJSONResponse(resp, &experiment); err != nil {
+		return nil, fmt.Errorf("failed to create experiment: %w", err)
 	}
 
 	er.experimentId = experiment.Id
@@ -296,36 +233,15 @@ func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, example Example, 
 		"scores":  scores,
 	}
 
-	jsonData, err := json.Marshal(requestBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
 	url := fmt.Sprintf("%s/experiment/%s/example/%s/scoreAndStore", er.serverUrl, er.experimentId, example.Id)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if er.apiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", er.apiKey))
-	}
-
-	resp, err := er.client.Do(req)
+	resp, err := makeRequest(ctx, "POST", url, requestBody, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to score and store: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to score and store: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-	}
 
 	var scoreResult ScoreResult
-	if err := json.NewDecoder(resp.Body).Decode(&scoreResult); err != nil {
-		return nil, fmt.Errorf("failed to decode score result: %w", err)
+	if err := parseJSONResponse(resp, &scoreResult); err != nil {
+		return nil, fmt.Errorf("failed to score and store: %w", err)
 	}
 
 	fmt.Printf("AIQA: scoreAndStore response: %v\n", scoreResult)
@@ -346,7 +262,7 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 		if err != nil {
 			return fmt.Errorf("failed to run example %s: %w", example.Id, err)
 		}
-		if scores != nil && len(scores) > 0 {
+		if len(scores) > 0 {
 			er.scores = append(er.scores, struct {
 				example Example
 				result  interface{}
@@ -416,13 +332,9 @@ func (er *ExperimentRunner) RunExample(ctx context.Context, example Example, cal
 
 		fmt.Printf("AIQA: Running with parameters: %v\n", parametersHere)
 
-		// Set env vars from parametersHere
-		for key, value := range parametersHere {
-			if value != nil {
-				os.Setenv(key, fmt.Sprintf("%v", value))
-			}
-		}
-
+		// Note: Parameters are passed directly to the engine function.
+		// Engine functions should read from the parameters map, not from environment variables,
+		// to ensure thread-safety and avoid global state mutation.
 		start := time.Now()
 		output, err := callMyCode(input, parametersHere)
 		if err != nil {
@@ -464,30 +376,14 @@ func (er *ExperimentRunner) GetSummaryResults(ctx context.Context) (map[string]M
 	}
 
 	url := fmt.Sprintf("%s/experiment/%s", er.serverUrl, er.experimentId)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if er.apiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", er.apiKey))
-	}
-
-	resp, err := er.client.Do(req)
+	resp, err := makeRequest(ctx, "GET", url, nil, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch summary results: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to fetch summary results: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-	}
 
 	var experiment Experiment
-	if err := json.NewDecoder(resp.Body).Decode(&experiment); err != nil {
-		return nil, fmt.Errorf("failed to decode experiment: %w", err)
+	if err := parseJSONResponse(resp, &experiment); err != nil {
+		return nil, fmt.Errorf("failed to fetch summary results: %w", err)
 	}
 
 	// Convert summary_results to MetricStats

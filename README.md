@@ -339,7 +339,7 @@ export AIQA_DATA_FILTERS="RemovePasswords, RemoveAPIKeys"
 ## Running the Example
 
 ```bash
-go run example.go
+go run examples/example.go
 ```
 
 Make sure `AIQA_SERVER_URL` and `AIQA_API_KEY` are set in your environment.

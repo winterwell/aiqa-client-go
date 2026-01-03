@@ -2,11 +2,9 @@ package aiqa
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
-	"net/http"
 	"os"
 	"reflect"
 	"runtime"
@@ -14,13 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -28,21 +26,21 @@ var (
 	tracerProvider *sdktrace.TracerProvider
 	tracer         trace.Tracer
 	exporter       *AIQAExporter
-	samplingRate   float64 = 1.0 // Default: sample all traces
-	componentTag   string  = ""  // Component tag to add to all spans
+	samplingRate   float64 = 1.0  // Default: sample all traces
+	componentTag   string  = ""   // Component tag to add to all spans
 	tracingEnabled bool    = true // Whether tracing is enabled (set to false if env vars missing)
 )
 
 func init() {
+	// Load .env file if it exists (optional - won't error if missing)
+	// This allows local development with .env files
+	_ = godotenv.Load()
+
 	// Read component tag from environment variable
 	if envTag := os.Getenv("AIQA_COMPONENT_TAG"); envTag != "" {
 		componentTag = envTag
 	}
 }
-
-const (
-	tracerName = "aiqa-tracer"
-)
 
 // traceIDSampler implements deterministic sampling based on trace-id
 type traceIDSampler struct {
@@ -112,8 +110,42 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 		}
 		fmt.Printf("AIQA: WARNING: Tracing is disabled: missing required environment variables: %s\n", strings.Join(missingVars, ", "))
 		fmt.Printf("AIQA: Your application will continue to run without tracing.\n")
+
+		// Shutdown any existing tracing infrastructure to prevent spans from being sent
 		tracingEnabled = false
+		if tracerProvider != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = tracerProvider.Shutdown(ctx)
+			tracerProvider = nil
+		}
+		if exporter != nil {
+			// Disable exporter to prevent sending spans
+			exporter.Disable()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = exporter.Shutdown(ctx)
+			exporter = nil
+		}
+		tracer = nil
 		return nil
+	}
+
+	// Clean up any existing tracing infrastructure before creating new one
+	// This ensures we can safely toggle between enabled/disabled states
+	if tracerProvider != nil || exporter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if tracerProvider != nil {
+			_ = tracerProvider.Shutdown(ctx)
+			tracerProvider = nil
+		}
+		if exporter != nil {
+			exporter.Disable()
+			_ = exporter.Shutdown(ctx)
+			exporter = nil
+		}
+		tracer = nil
 	}
 
 	tracingEnabled = true
@@ -138,16 +170,16 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 
 	exporter = NewAIQAExporter(serverURL, apiKey, 5)
 
-	// Check if a TracerProvider is already set
+	// Check if a TracerProvider is already set and not shut down
 	existingProvider := otel.GetTracerProvider()
 
 	// Try to cast to SDK TracerProvider to see if it's a real provider
-	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok {
+	// Only reuse if it's our own provider (not shut down)
+	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok && tracerProvider == sdkProvider && tracerProvider != nil {
 		// Real provider already exists, add our span processor to it
 		bsp := sdktrace.NewBatchSpanProcessor(exporter)
 		sdkProvider.RegisterSpanProcessor(bsp)
-		tracerProvider = sdkProvider
-		tracer = otel.Tracer(tracerName)
+		tracer = otel.Tracer(AIQATracerName)
 		return nil
 	}
 
@@ -155,7 +187,7 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 	res, err := resource.New(
 		context.Background(),
 		resource.WithAttributes(
-			semconv.ServiceNameKey.String("example-service"),
+			attribute.String("service.name", "example-service"),
 		),
 	)
 	if err != nil {
@@ -175,7 +207,7 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 	)
 
 	otel.SetTracerProvider(tracerProvider)
-	tracer = otel.Tracer(tracerName)
+	tracer = otel.Tracer(AIQATracerName)
 
 	return nil
 }
@@ -201,10 +233,16 @@ func ShutdownTracing(ctx context.Context) error {
 		if err := tracerProvider.Shutdown(ctx); err != nil {
 			return err
 		}
+		tracerProvider = nil
 	}
 	if exporter != nil {
-		return exporter.Shutdown(ctx)
+		if err := exporter.Shutdown(ctx); err != nil {
+			return err
+		}
+		exporter = nil
 	}
+	tracer = nil
+	tracingEnabled = false
 	return nil
 }
 
@@ -237,23 +275,11 @@ func WithTracing(fn interface{}, options ...TracingOptions) interface{} {
 		// For now, we'll just wrap it
 	}
 
-	// Determine if function is async (returns error or context)
-	isAsync := false
-	if fnType.NumOut() > 0 {
-		lastOut := fnType.Out(fnType.NumOut() - 1)
-		if lastOut.String() == "error" {
-			isAsync = true
-		}
-	}
-
-	if isAsync {
-		return wrapAsyncFunction(fnValue, fnType, fnName, opt)
-	}
-	return wrapSyncFunction(fnValue, fnType, fnName, opt)
+	return wrapFunction(fnValue, fnType, fnName, opt)
 }
 
-// wrapSyncFunction wraps a synchronous function
-func wrapSyncFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt TracingOptions) interface{} {
+// wrapFunction wraps a function to automatically create spans
+func wrapFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt TracingOptions) interface{} {
 	wrapper := reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
 		// If tracing is disabled, just execute the function without creating spans
 		if !tracingEnabled || tracer == nil {
@@ -294,66 +320,6 @@ func wrapSyncFunction(fnValue reflect.Value, fnType reflect.Type, fnName string,
 				span.SetAttributes(attribute.String("output", serializeValue(output)))
 			}
 
-			// Check for error
-			lastResult := results[len(results)-1]
-			if lastResult.Type().String() == "error" && !lastResult.IsNil() {
-				err := lastResult.Interface().(error)
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			} else {
-				span.SetStatus(codes.Ok, "")
-			}
-		} else {
-			span.SetStatus(codes.Ok, "")
-		}
-
-		return results
-	})
-
-	return wrapper.Interface()
-}
-
-// wrapAsyncFunction wraps an asynchronous function (one that returns error)
-func wrapAsyncFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt TracingOptions) interface{} {
-	wrapper := reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
-		// If tracing is disabled, just execute the function without creating spans
-		if !tracingEnabled || tracer == nil {
-			return fnValue.Call(args)
-		}
-
-		ctx := context.Background()
-		if len(args) > 0 {
-			if ctxVal := args[0]; ctxVal.Type().String() == "context.Context" {
-				ctx = ctxVal.Interface().(context.Context)
-			}
-		}
-
-		ctx, span := tracer.Start(ctx, fnName)
-		defer span.End()
-
-		// Set component tag if configured
-		setComponentTagIfSet(span)
-
-		// Prepare input
-		input := prepareInput(args, opt)
-		if input != nil {
-			span.SetAttributes(attribute.String("input", serializeValue(input)))
-		}
-
-		// Execute function
-		results := fnValue.Call(args)
-
-		// Handle results
-		if len(results) > 0 {
-			output := prepareOutput(results, opt)
-			if output != nil {
-				// Extract and set token usage before setting output
-				extractAndSetTokenUsage(span, output)
-				// Extract and set provider/model before setting output
-				extractAndSetProviderAndModel(span, output)
-				span.SetAttributes(attribute.String("output", serializeValue(output)))
-			}
-
 			// Check for error (last return value)
 			lastResult := results[len(results)-1]
 			if lastResult.Type().String() == "error" {
@@ -364,7 +330,11 @@ func wrapAsyncFunction(fnValue reflect.Value, fnType reflect.Type, fnName string
 				} else {
 					span.SetStatus(codes.Ok, "")
 				}
+			} else {
+				span.SetStatus(codes.Ok, "")
 			}
+		} else {
+			span.SetStatus(codes.Ok, "")
 		}
 
 		return results
@@ -453,171 +423,11 @@ func prepareOutput(results []reflect.Value, opt TracingOptions) interface{} {
 	return result
 }
 
-// getEnabledFilters returns a set of enabled filter names from AIQA_DATA_FILTERS env var
-// Default filters: RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys
-func getEnabledFilters() map[string]bool {
-	filtersEnv := os.Getenv("AIQA_DATA_FILTERS")
-	if filtersEnv == "" {
-		filtersEnv = "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys"
-	}
-	// Check if explicitly disabled
-	if strings.ToLower(filtersEnv) == "false" {
-		return make(map[string]bool)
-	}
-	enabled := make(map[string]bool)
-	for _, f := range strings.Split(filtersEnv, ",") {
-		f = strings.TrimSpace(f)
-		if f != "" {
-			enabled[f] = true
-		}
-	}
-	return enabled
-}
-
-// isJWTToken checks if a value looks like a JWT token (starts with "eyJ" and has 3 parts separated by dots)
-func isJWTToken(value interface{}) bool {
-	str, ok := value.(string)
-	if !ok {
-		return false
-	}
-	// JWT tokens have format: header.payload.signature (3 parts separated by dots)
-	// They typically start with "eyJ" (base64 encoded '{"')
-	parts := strings.Split(str, ".")
-	return len(parts) == 3 && strings.HasPrefix(str, "eyJ") && len(parts[0]) > 0 && len(parts[1]) > 0 && len(parts[2]) > 0
-}
-
-// isAPIKey checks if a value looks like an API key based on common patterns
-func isAPIKey(value interface{}) bool {
-	str, ok := value.(string)
-	if !ok {
-		return false
-	}
-	str = strings.TrimSpace(str)
-	// Common API key prefixes
-	apiKeyPrefixes := []string{"sk-", "pk-", "AKIA", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"}
-	for _, prefix := range apiKeyPrefixes {
-		if strings.HasPrefix(str, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// applyDataFilters applies data filters to a key-value pair based on enabled filters
-func applyDataFilters(key string, value interface{}) interface{} {
-	// Don't filter falsy values (nil, empty string, zero, false)
-	if value == nil {
-		return value
-	}
-
-	// Check if value is falsy - only filter non-falsy values
-	switch v := value.(type) {
-	case string:
-		if v == "" {
-			return value
-		}
-	case int:
-		if v == 0 {
-			return value
-		}
-	case int64:
-		if v == 0 {
-			return value
-		}
-	case float64:
-		if v == 0 {
-			return value
-		}
-	case bool:
-		if !v {
-			return value
-		}
-	}
-	// For other types, proceed with filtering
-
-	enabledFilters := getEnabledFilters()
-	keyLower := strings.ToLower(key)
-
-	// RemovePasswords filter: if key contains "password", replace value with "****"
-	if enabledFilters["RemovePasswords"] && strings.Contains(keyLower, "password") {
-		return "****"
-	}
-
-	// RemoveJWT filter: if value looks like a JWT token, replace with "****"
-	if enabledFilters["RemoveJWT"] && isJWTToken(value) {
-		return "****"
-	}
-
-	// RemoveAuthHeaders filter: if key is "authorization" (case-insensitive), replace value with "****"
-	if enabledFilters["RemoveAuthHeaders"] && keyLower == "authorization" {
-		return "****"
-	}
-
-	// RemoveAPIKeys filter: if key contains API key patterns or value looks like an API key
-	if enabledFilters["RemoveAPIKeys"] {
-		// Check key patterns
-		apiKeyKeyPatterns := []string{"api_key", "apikey", "api-key"}
-		for _, pattern := range apiKeyKeyPatterns {
-			if strings.Contains(keyLower, pattern) {
-				return "****"
-			}
-		}
-		// Check value patterns
-		if isAPIKey(value) {
-			return "****"
-		}
-	}
-
-	return value
-}
-
-// filterDataRecursive recursively applies data filters to nested structures
-func filterDataRecursive(data interface{}) interface{} {
-	if data == nil {
-		return data
-	}
-
-	switch v := data.(type) {
-	case map[string]interface{}:
-		result := make(map[string]interface{})
-		for k, val := range v {
-			filteredVal := applyDataFilters(k, val)
-			result[k] = filterDataRecursive(filteredVal)
-		}
-		return result
-	case []interface{}:
-		result := make([]interface{}, len(v))
-		for i, item := range v {
-			result[i] = filterDataRecursive(item)
-		}
-		return result
-	default:
-		// For other types, try to convert to map if possible
-		// This handles structs and other complex types
-		jsonBytes, err := json.Marshal(v)
-		if err != nil {
-			return applyDataFilters("", v)
-		}
-		var jsonData interface{}
-		if err := json.Unmarshal(jsonBytes, &jsonData); err != nil {
-			return applyDataFilters("", v)
-		}
-		return filterDataRecursive(jsonData)
-	}
-}
-
 // serializeValue serializes a value to JSON string for span attributes
+// Filter functions (getEnabledFilters, applyDataFilters, filterDataRecursive, etc.) are now in object_serialiser.go
+// This is kept for backward compatibility but delegates to the new implementation
 func serializeValue(value interface{}) string {
-	// Apply data filters before serialization
-	filteredValue := filterDataRecursive(value)
-
-	// Try JSON serialization first
-	jsonBytes, err := json.Marshal(filteredValue)
-	if err != nil {
-		// Fallback to string representation
-		return fmt.Sprintf("%v", filteredValue)
-	}
-	return string(jsonBytes)
+	return SerializeValue(value)
 }
 
 // SetSpanAttribute sets an attribute on the active span
@@ -627,50 +437,6 @@ func SetSpanAttribute(ctx context.Context, attributeName string, attributeValue 
 		span.SetAttributes(attribute.String(attributeName, serializeValue(attributeValue)))
 		return true
 	}
-	return false
-}
-
-// isAttributeSet checks if an attribute is already set on a span.
-// Returns true if the attribute exists, false otherwise.
-// Safe against exceptions.
-func isAttributeSet(span trace.Span, attributeName string) bool {
-	// OpenTelemetry Go SDK doesn't expose a direct way to check if an attribute is set.
-	// We'll use a conservative approach: try to access internal attributes if possible,
-	// otherwise assume not set to allow setting.
-	defer func() {
-		// Recover from any panics
-		if r := recover(); r != nil {
-			// If anything goes wrong, assume not set (conservative approach)
-		}
-	}()
-
-	// Check if span is recording first
-	if !span.IsRecording() {
-		return false
-	}
-
-	// Try to access span's internal attributes if available
-	// This is SDK-specific and may not work for all span implementations
-	if sdkSpan, ok := span.(interface{ Attributes() []attribute.KeyValue }); ok {
-		attrs := sdkSpan.Attributes()
-		for _, kv := range attrs {
-			if string(kv.Key) == attributeName {
-				return true
-			}
-		}
-	}
-
-	// Try alternative method: check if span has a way to get attributes
-	// Some SDK implementations may store attributes differently
-	if attrSpan, ok := span.(interface{ GetAttributes() map[string]interface{} }); ok {
-		attrs := attrSpan.GetAttributes()
-		if attrs != nil {
-			if _, exists := attrs[attributeName]; exists {
-				return true
-			}
-		}
-	}
-
 	return false
 }
 
@@ -810,8 +576,8 @@ func extractAndSetTokenUsage(span trace.Span, result interface{}) {
 			}
 		}
 
-		// Only set attributes that are not already set
-		if promptTokens != nil && !isAttributeSet(span, "gen_ai.usage.input_tokens") {
+		// Set attributes if found
+		if promptTokens != nil {
 			if tokens, ok := promptTokens.(int); ok {
 				span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", tokens))
 			} else if tokens, ok := promptTokens.(int64); ok {
@@ -821,7 +587,7 @@ func extractAndSetTokenUsage(span trace.Span, result interface{}) {
 			}
 		}
 
-		if completionTokens != nil && !isAttributeSet(span, "gen_ai.usage.output_tokens") {
+		if completionTokens != nil {
 			if tokens, ok := completionTokens.(int); ok {
 				span.SetAttributes(attribute.Int("gen_ai.usage.output_tokens", tokens))
 			} else if tokens, ok := completionTokens.(int64); ok {
@@ -831,7 +597,7 @@ func extractAndSetTokenUsage(span trace.Span, result interface{}) {
 			}
 		}
 
-		if totalTokens != nil && !isAttributeSet(span, "gen_ai.usage.total_tokens") {
+		if totalTokens != nil {
 			if tokens, ok := totalTokens.(int); ok {
 				span.SetAttributes(attribute.Int("gen_ai.usage.total_tokens", tokens))
 			} else if tokens, ok := totalTokens.(int64); ok {
@@ -932,8 +698,8 @@ func extractAndSetProviderAndModel(span trace.Span, result interface{}) {
 		}
 	}
 
-	// Set attributes if found and not already set
-	if model != nil && !isAttributeSet(span, "gen_ai.request.model") {
+	// Set attributes if found
+	if model != nil {
 		if modelStr, ok := model.(string); ok && modelStr != "" {
 			span.SetAttributes(attribute.String("gen_ai.request.model", modelStr))
 		} else {
@@ -942,7 +708,7 @@ func extractAndSetProviderAndModel(span trace.Span, result interface{}) {
 		}
 	}
 
-	if provider != nil && !isAttributeSet(span, "gen_ai.provider.name") {
+	if provider != nil {
 		if providerStr, ok := provider.(string); ok && providerStr != "" {
 			span.SetAttributes(attribute.String("gen_ai.provider.name", providerStr))
 		} else {
@@ -1185,8 +951,8 @@ type FeedbackOptions struct {
 //	    log.Printf("Found span: %v", span["name"])
 //	}
 func GetSpan(ctx context.Context, spanId string, organisationId string) (map[string]interface{}, error) {
-	serverURL := os.Getenv("AIQA_SERVER_URL")
-	apiKey := os.Getenv("AIQA_API_KEY")
+	serverURL := GetServerURL("")
+	apiKey := GetAPIKey("")
 	orgID := organisationId
 	if orgID == "" {
 		orgID = os.Getenv("AIQA_ORGANISATION_ID")
@@ -1200,47 +966,34 @@ func GetSpan(ctx context.Context, spanId string, organisationId string) (map[str
 		return nil, fmt.Errorf("Organisation ID is required. Provide it as parameter or set AIQA_ORGANISATION_ID environment variable")
 	}
 
-	// Remove trailing slash
-	serverURL = strings.TrimSuffix(serverURL, "/")
-
 	// Try both spanId and clientSpanId queries
 	queryFields := []string{"spanId", "clientSpanId"}
 	for _, queryField := range queryFields {
 		url := fmt.Sprintf("%s/span?q=%s:%s&organisation=%s&limit=1", serverURL, queryField, spanId, orgID)
 
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		resp, err := makeRequest(ctx, "GET", url, nil, apiKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, fmt.Errorf("failed to get span: %w", err)
 		}
-
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", apiKey))
-		}
-
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send request: %w", err)
-		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode == 200 {
 			var result struct {
 				Hits  []map[string]interface{} `json:"hits"`
 				Total int                      `json:"total"`
 			}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				return nil, fmt.Errorf("failed to decode response: %w", err)
+			if err := parseJSONResponse(resp, &result); err == nil {
+				if len(result.Hits) > 0 {
+					return result.Hits[0], nil
+				}
 			}
-			if len(result.Hits) > 0 {
-				return result.Hits[0], nil
-			}
+			// parseJSONResponse already closes the body
 		} else if resp.StatusCode == 400 {
 			// Try next query field
+			resp.Body.Close()
 			continue
 		} else {
 			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			return nil, fmt.Errorf("failed to get span: %d %s - %s", resp.StatusCode, resp.Status, string(body))
 		}
 	}
