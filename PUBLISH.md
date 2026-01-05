@@ -15,7 +15,7 @@ The Go client uses semantic versioning and follows Go module conventions:
 
 ### 1. Update Version
 
-Update the version in `version.json`
+Update the version in `version.json`uj
 
 ```bash
 # Edit version.json to update the VERSION field

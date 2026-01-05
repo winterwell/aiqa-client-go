@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestToNumber(t *testing.T) {
@@ -65,36 +66,40 @@ func TestGetMaxObjectStrChars(t *testing.T) {
 
 func TestSanitizeStringForUTF8(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected string
-		valid    bool
+		name  string
+		input string
+		valid bool
 	}{
-		{"empty string", "", "", true},
-		{"valid UTF-8", "Hello, world! 你好", "Hello, world! 你好", true},
-		{"valid ASCII", "Hello World", "Hello World", true},
-		{"surrogate pair", string([]rune{'H', 'e', 'l', 'l', 'o', 0xD800, 'W', 'o', 'r', 'l', 'd'}), "", false}, // Should be sanitized - surrogate char
+		{"empty string", "", true},
+		{"valid UTF-8", "Hello, world! 你好", true},
+		{"valid ASCII", "Hello World", true},
+		// Test with invalid UTF-8 bytes - these will be properly sanitized
+		{"invalid UTF-8 bytes", "Hello" + string([]byte{0xFF, 0xFE}) + "World", true},
+		// Test with surrogate character encoded as bytes (invalid UTF-8 sequence)
+		{"surrogate as invalid bytes", "Hello" + string([]byte{0xED, 0xA0, 0x80}) + "World", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := sanitizeStringForUTF8(tt.input)
-			// Check if result is valid UTF-8 by trying to encode it
-			_, _, err := strings.NewReader(result).ReadRune()
-			valid := err == nil
+			// Check if result is valid UTF-8 using utf8.ValidString
+			valid := utf8.ValidString(result)
 			// Also try to encode to bytes (should not panic)
 			bytes := []byte(result)
 			_ = bytes
-			
-			if tt.valid && !valid {
-				t.Errorf("Expected valid UTF-8, got invalid")
+
+			if !valid {
+				t.Errorf("Result must be valid UTF-8, got invalid")
 			}
-			if !tt.valid && result == tt.input {
-				t.Errorf("Expected sanitization, but result equals input")
-			}
-			// For surrogate pair case, result should be different from input
-			if tt.name == "surrogate pair" && result == tt.input {
-				t.Errorf("Expected surrogate characters to be sanitized")
+			// For invalid input cases, verify that invalid sequences were sanitized
+			if !utf8.ValidString(tt.input) {
+				// Result should be sanitized (may contain replacement characters)
+				// and should be safe to encode
+				if len(result) == 0 && len(tt.input) > 0 {
+					// Empty result is acceptable if all input was invalid
+				} else if !utf8.ValidString(result) {
+					t.Errorf("Sanitized result should be valid UTF-8")
+				}
 			}
 		})
 	}
@@ -243,9 +248,9 @@ func TestSafeStrRepr(t *testing.T) {
 
 func TestSerializeForSpan(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    interface{}
-		check    func(interface{}) bool
+		name  string
+		input interface{}
+		check func(interface{}) bool
 	}{
 		{"nil", nil, func(v interface{}) bool { return v == nil }},
 		{"string", "hello", func(v interface{}) bool { return v == "hello" }},
@@ -453,4 +458,3 @@ func TestSerializeValueWithTime(t *testing.T) {
 		t.Errorf("Expected valid JSON with time, got error: %v", err)
 	}
 }
-

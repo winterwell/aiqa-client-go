@@ -15,11 +15,11 @@ func toNumber(value string) int {
 	if value == "" {
 		return 0
 	}
-	
+
 	// Remove trailing 'b' if present (e.g., "100mb" -> "100m")
 	value = strings.TrimSpace(value)
 	value = strings.TrimSuffix(value, "b")
-	
+
 	// Handle units
 	if strings.HasSuffix(value, "g") {
 		numStr := value[:len(value)-1]
@@ -43,7 +43,7 @@ func toNumber(value string) int {
 		}
 		return num * 1024
 	}
-	
+
 	// No unit, just parse as int
 	num, err := strconv.Atoi(value)
 	if err != nil {
@@ -68,13 +68,21 @@ func sanitizeStringForUTF8(text string) string {
 	if text == "" {
 		return text
 	}
-	
-	// Check if string is valid UTF-8
-	if utf8.ValidString(text) {
+
+	// Check if string is valid UTF-8 and has no surrogates
+	hasSurrogates := false
+	for _, r := range text {
+		if r >= 0xD800 && r <= 0xDFFF {
+			hasSurrogates = true
+			break
+		}
+	}
+
+	if utf8.ValidString(text) && !hasSurrogates {
 		return text
 	}
-	
-	// Replace invalid UTF-8 sequences with replacement character
+
+	// Replace invalid UTF-8 sequences and surrogate pairs with replacement character
 	var result strings.Builder
 	for _, r := range text {
 		if r == utf8.RuneError {
@@ -86,6 +94,7 @@ func sanitizeStringForUTF8(text string) string {
 			result.WriteRune(r)
 		}
 	}
+
 	return result.String()
 }
 
@@ -145,7 +154,7 @@ func applyDataFilters(key string, value interface{}) interface{} {
 	if value == nil {
 		return value
 	}
-	
+
 	// Check if value is falsy - only filter non-falsy values
 	switch v := value.(type) {
 	case string:
@@ -169,25 +178,25 @@ func applyDataFilters(key string, value interface{}) interface{} {
 			return value
 		}
 	}
-	
+
 	enabledFilters := getEnabledFilters()
 	keyLower := strings.ToLower(key)
-	
+
 	// RemovePasswords filter: if key contains "password", replace value with "****"
 	if enabledFilters["RemovePasswords"] && strings.Contains(keyLower, "password") {
 		return "****"
 	}
-	
+
 	// RemoveJWT filter: if value looks like a JWT token, replace with "****"
 	if enabledFilters["RemoveJWT"] && isJWTToken(value) {
 		return "****"
 	}
-	
+
 	// RemoveAuthHeaders filter: if key is "authorization" (case-insensitive), replace value with "****"
 	if enabledFilters["RemoveAuthHeaders"] && keyLower == "authorization" {
 		return "****"
 	}
-	
+
 	// RemoveAPIKeys filter: if key contains API key patterns or value looks like an API key
 	if enabledFilters["RemoveAPIKeys"] {
 		// Check key patterns
@@ -202,7 +211,7 @@ func applyDataFilters(key string, value interface{}) interface{} {
 			return "****"
 		}
 	}
-	
+
 	return value
 }
 
@@ -212,13 +221,13 @@ func applyDataFilters(key string, value interface{}) interface{} {
 // Also sanitizes surrogate characters to prevent UTF-8 encoding errors
 func safeStrRepr(value interface{}) string {
 	maxChars := GetMaxObjectStrChars()
-	
+
 	// Try to get string representation
 	var reprStr string
 	if value == nil {
 		return "nil"
 	}
-	
+
 	// Use reflection to get a reasonable string representation
 	val := reflect.ValueOf(value)
 	switch val.Kind() {
@@ -232,10 +241,10 @@ func safeStrRepr(value interface{}) string {
 	default:
 		reprStr = fmt.Sprintf("%v", value)
 	}
-	
+
 	// Sanitize surrogate characters
 	reprStr = sanitizeStringForUTF8(reprStr)
-	
+
 	// Limit length to avoid huge strings
 	if len(reprStr) > maxChars {
 		return reprStr[:maxChars] + "... (truncated)"
@@ -250,7 +259,7 @@ func SerializeForSpan(value interface{}) interface{} {
 	if value == nil {
 		return nil
 	}
-	
+
 	// Keep primitives as is
 	switch v := value.(type) {
 	case string, int, int64, float64, bool:
@@ -258,7 +267,7 @@ func SerializeForSpan(value interface{}) interface{} {
 	case []byte:
 		return v
 	}
-	
+
 	// For slices, check if all elements are primitives
 	if reflect.TypeOf(value).Kind() == reflect.Slice {
 		val := reflect.ValueOf(value)
@@ -282,7 +291,7 @@ func SerializeForSpan(value interface{}) interface{} {
 		}
 		return string(jsonBytes)
 	}
-	
+
 	// For maps and other complex types, serialize to JSON string
 	jsonBytes, err := json.Marshal(value)
 	if err != nil {
@@ -296,7 +305,7 @@ func filterDataRecursive(data interface{}) interface{} {
 	if data == nil {
 		return data
 	}
-	
+
 	switch v := data.(type) {
 	case map[string]interface{}:
 		result := make(map[string]interface{})
@@ -338,7 +347,7 @@ func filterDataRecursive(data interface{}) interface{} {
 func SerializeValue(value interface{}) string {
 	// Apply data filters before serialization
 	filteredValue := filterDataRecursive(value)
-	
+
 	// Try JSON serialization first
 	jsonBytes, err := json.Marshal(filteredValue)
 	if err != nil {
@@ -347,4 +356,3 @@ func SerializeValue(value interface{}) string {
 	}
 	return string(jsonBytes)
 }
-

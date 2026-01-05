@@ -30,6 +30,11 @@ func TestNewAIQAExporter(t *testing.T) {
 
 	// Test with provided args
 	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		exporter.Shutdown(ctx)
+	}()
 	if exporter == nil {
 		t.Fatal("NewAIQAExporter should return a non-nil exporter")
 	}
@@ -47,6 +52,11 @@ func TestNewAIQAExporter(t *testing.T) {
 	os.Setenv("AIQA_SERVER_URL", "http://env-server:3000")
 	os.Setenv("AIQA_API_KEY", "env-key")
 	exporter2 := NewAIQAExporter("", "", 10)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		exporter2.Shutdown(ctx)
+	}()
 	if exporter2.serverURL != "http://env-server:3000" {
 		t.Errorf("Expected serverURL from env, got '%s'", exporter2.serverURL)
 	}
@@ -56,7 +66,8 @@ func TestNewAIQAExporter(t *testing.T) {
 }
 
 func TestAIQAExporter_ExportSpans(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -84,7 +95,8 @@ func TestAIQAExporter_ExportSpans(t *testing.T) {
 }
 
 func TestAIQAExporter_SerializeSpan(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -104,7 +116,8 @@ func TestAIQAExporter_SerializeSpan(t *testing.T) {
 }
 
 func TestAIQAExporter_Flush(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -134,7 +147,8 @@ func TestAIQAExporter_Flush(t *testing.T) {
 }
 
 func TestAIQAExporter_SplitIntoBatches(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -173,7 +187,8 @@ func TestAIQAExporter_SplitIntoBatches(t *testing.T) {
 }
 
 func TestAIQAExporter_Shutdown(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -191,7 +206,8 @@ func TestAIQAExporter_Shutdown(t *testing.T) {
 }
 
 func TestAIQAExporter_AddToBuffer(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -218,7 +234,8 @@ func TestAIQAExporter_AddToBuffer(t *testing.T) {
 }
 
 func TestAIQAExporter_RemoveSpanKeysFromTracking(t *testing.T) {
-	exporter := NewAIQAExporter("http://localhost:3000", "test-key", 5)
+	// Use empty server URL to avoid network requests during test
+	exporter := NewAIQAExporter("", "test-key", 5)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

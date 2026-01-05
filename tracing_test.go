@@ -16,21 +16,21 @@ import (
 // It marks itself as a test helper so failures are reported at the call site.
 func setupTracingTest(t *testing.T, serverURL, apiKey string, samplingRate float64) func() {
 	t.Helper()
-	
+
 	// Save original env vars
 	originalServerURL := os.Getenv("AIQA_SERVER_URL")
 	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	
+
 	// Clear env vars
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
-	
+
 	// Initialize tracing
 	err := InitTracing(serverURL, apiKey, samplingRate)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
-	
+
 	// Return cleanup function
 	return func() {
 		// Restore env vars
@@ -97,28 +97,28 @@ func TestInitTracing_WithMissingEnvVars(t *testing.T) {
 
 func TestInitTracing(t *testing.T) {
 	tests := []struct {
-		name        string
-		serverURL   string
-		apiKey      string
+		name         string
+		serverURL    string
+		apiKey       string
 		samplingRate float64
-		wantEnabled bool
-		wantErr     bool
+		wantEnabled  bool
+		wantErr      bool
 	}{
 		{
-			name:        "with provided args",
-			serverURL:   "http://localhost:3000",
-			apiKey:      "test-key",
+			name:         "with provided args",
+			serverURL:    "http://127.0.0.1:1", // Use invalid port to fail fast in tests
+			apiKey:       "test-key",
 			samplingRate: 0.5,
-			wantEnabled: true,
-			wantErr:     false,
+			wantEnabled:  true,
+			wantErr:      false,
 		},
 		{
-			name:        "missing env vars",
-			serverURL:   "",
-			apiKey:      "",
+			name:         "missing env vars",
+			serverURL:    "",
+			apiKey:       "",
 			samplingRate: 1.0,
-			wantEnabled: false,
-			wantErr:     false,
+			wantEnabled:  false,
+			wantErr:      false,
 		},
 	}
 
@@ -162,7 +162,6 @@ func TestInitTracing(t *testing.T) {
 	}
 }
 
-
 func TestInitTracing_SamplingRateClamping(t *testing.T) {
 	// Save original env vars
 	originalServerURL := os.Getenv("AIQA_SERVER_URL")
@@ -187,13 +186,14 @@ func TestInitTracing_SamplingRateClamping(t *testing.T) {
 	os.Unsetenv("AIQA_API_KEY")
 
 	// Test negative sampling rate (should be clamped to 0)
-	err := InitTracing("http://localhost:3000", "test-key", -1.0)
+	// Use invalid port to fail fast in tests
+	err := InitTracing("http://127.0.0.1:1", "test-key", -1.0)
 	if err != nil {
 		t.Fatalf("InitTracing should succeed: %v", err)
 	}
 
 	// Test sampling rate > 1 (should be clamped to 1)
-	err = InitTracing("http://localhost:3000", "test-key", 2.0)
+	err = InitTracing("http://127.0.0.1:1", "test-key", 2.0)
 	if err != nil {
 		t.Fatalf("InitTracing should succeed: %v", err)
 	}
@@ -253,7 +253,8 @@ func TestWithTracing_SyncFunction(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0) // Disable sampling for testing
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0) // Disable sampling for testing
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -292,7 +293,8 @@ func TestWithTracing_AsyncFunction(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -337,7 +339,8 @@ func TestWithTracing_WithContext(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -414,11 +417,11 @@ func TestIsAPIKey(t *testing.T) {
 
 func TestApplyDataFilters(t *testing.T) {
 	tests := []struct {
-		name        string
-		filtersEnv  string
-		key         string
-		value       interface{}
-		want        interface{}
+		name       string
+		filtersEnv string
+		key        string
+		value      interface{}
+		want       interface{}
 	}{
 		{
 			name:       "RemovePasswords filter",
@@ -450,7 +453,7 @@ func TestApplyDataFilters(t *testing.T) {
 		},
 		{
 			name:       "filters disabled",
-			filtersEnv:  "false",
+			filtersEnv: "false",
 			key:        "password",
 			value:      "secret123",
 			want:       "secret123",
@@ -484,9 +487,9 @@ func TestFilterDataRecursive(t *testing.T) {
 
 	// Test nested map
 	data := map[string]interface{}{
-		"user": "john",
+		"user":     "john",
 		"password": "secret",
-		"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgI",
+		"token":    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgI",
 		"nested": map[string]interface{}{
 			"password": "nested-secret",
 		},
@@ -561,7 +564,8 @@ func TestSetSpanAttribute(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -618,7 +622,8 @@ func TestGetTraceId(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -665,7 +670,8 @@ func TestGetSpanId(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -712,7 +718,8 @@ func TestCreateSpanFromTraceId(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -760,7 +767,8 @@ func TestExtractAndSetTokenUsage(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -772,7 +780,7 @@ func TestExtractAndSetTokenUsage(t *testing.T) {
 	result := map[string]interface{}{
 		"usage": map[string]interface{}{
 			"prompt_tokens":     10,
-			"completion_tokens":  20,
+			"completion_tokens": 20,
 			"total_tokens":      30,
 		},
 	}
@@ -804,7 +812,8 @@ func TestExtractAndSetProviderAndModel(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 0.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -844,7 +853,8 @@ func TestSetTokenUsage(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -892,7 +902,8 @@ func TestSetProviderAndModel(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -939,7 +950,8 @@ func TestSetConversationId(t *testing.T) {
 	os.Unsetenv("AIQA_SERVER_URL")
 	os.Unsetenv("AIQA_API_KEY")
 
-	err := InitTracing("http://localhost:3000", "test-key", 1.0)
+	// Use invalid port to fail fast in tests (connection refused, not timeout)
+	err := InitTracing("http://127.0.0.1:1", "test-key", 1.0)
 	if err != nil {
 		t.Fatalf("Failed to init tracing: %v", err)
 	}
@@ -1015,4 +1027,3 @@ func TestPrepareOutput(t *testing.T) {
 		t.Errorf("Expected result1 to be 100, got %v", resultMap["result1"])
 	}
 }
-

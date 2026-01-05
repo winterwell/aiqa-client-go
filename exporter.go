@@ -498,9 +498,18 @@ func (e *AIQAExporter) sendSpans(ctx context.Context, spans []SerializableSpan) 
 		return fmt.Errorf("AIQA_SERVER_URL is not set. Cannot send spans to server")
 	}
 
+	// Check if context is already cancelled to avoid unnecessary work
+	if ctx.Err() != nil {
+		return fmt.Errorf("context cancelled: %w", ctx.Err())
+	}
+
 	url := fmt.Sprintf("%s/span", e.serverURL)
 	resp, err := makeRequest(ctx, "POST", url, spans, e.apiKey)
 	if err != nil {
+		// Don't return error if context was cancelled (expected during shutdown/timeout)
+		if ctx.Err() != nil {
+			return fmt.Errorf("request cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("failed to send spans: %w", err)
 	}
 
@@ -518,6 +527,14 @@ func (e *AIQAExporter) sendSpans(ctx context.Context, spans []SerializableSpan) 
 func (e *AIQAExporter) startAutoFlush() {
 	e.flushTimer = time.AfterFunc(e.flushInterval, func() {
 		if !e.shutdownRequested {
+			// Skip flush if server URL is not set (prevents hanging on network requests)
+			if e.serverURL == "" {
+				// Still restart timer even if server URL is empty, in case it gets set later
+				if !e.shutdownRequested {
+					e.startAutoFlush()
+				}
+				return
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := e.Flush(ctx); err != nil {

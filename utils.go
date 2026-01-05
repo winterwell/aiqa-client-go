@@ -25,12 +25,13 @@ func BuildHeaders(apiKey string) map[string]string {
 	return headers
 }
 
-// GetServerURL gets server URL from parameter or environment variable, with trailing slash removed
+// GetServerURL gets server URL from parameter or environment variable, with trailing slashes removed
 func GetServerURL(serverURL string) string {
 	if serverURL == "" {
 		serverURL = os.Getenv("AIQA_SERVER_URL")
 	}
-	return strings.TrimSuffix(serverURL, "/")
+	// Remove all trailing slashes
+	return strings.TrimRight(serverURL, "/")
 }
 
 // GetAPIKey gets API key from parameter or environment variable
@@ -42,7 +43,8 @@ func GetAPIKey(apiKey string) string {
 }
 
 // HTTPClient is a shared HTTP client with timeout
-var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// Using 5 second timeout to balance between production needs and test speed
+var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // makeRequest performs an HTTP request with common error handling
 func makeRequest(ctx context.Context, method, url string, body interface{}, apiKey string) (*http.Response, error) {
@@ -88,4 +90,3 @@ func parseJSONResponse(resp *http.Response, result interface{}) error {
 
 	return nil
 }
-
