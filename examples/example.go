@@ -8,6 +8,12 @@ import (
 	"github.com/winterwell/aiqa-client-go"
 )
 
+// Example usage of aiqa-client-go
+// To run this example:
+//
+//	First setup .env using env.example as a template
+//	go run examples/example.go
+//	Then go to https://app-aiqa.winterwell.com/traces (if that is your server) and see the traces
 func main() {
 	// Initialize tracing
 	err := aiqa.InitTracing("", "")
@@ -20,6 +26,10 @@ func main() {
 		defer cancel()
 		aiqa.ShutdownTracing(ctx)
 	}()
+
+	// What server and org are we logging to?
+	serverUrl := aiqa.GetServerURL("")
+	fmt.Printf("Logging to server: %s`n", serverUrl)
 
 	// Example 1: Simple function
 	multiply := func(x, y int) int {
@@ -73,4 +83,3 @@ func main() {
 		fmt.Printf("Failed to flush spans: %v\n", err)
 	}
 }
-
