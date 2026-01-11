@@ -110,6 +110,9 @@ func NewExperimentRunner(options ExperimentRunnerOptions) *ExperimentRunner {
 	serverUrl := options.ServerUrl
 	if serverUrl == "" {
 		serverUrl = os.Getenv("AIQA_SERVER_URL")
+		if serverUrl == "" {
+			serverUrl = "https://server-aiqa.winterwell.com"
+		}
 	}
 	// Remove trailing slash
 	serverUrl = strings.TrimSuffix(serverUrl, "/")

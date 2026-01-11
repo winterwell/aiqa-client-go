@@ -13,9 +13,11 @@ import (
 )
 
 // BuildHeaders builds HTTP headers for AIQA API requests
+// Note: net/http automatically handles gzip/deflate decompression when Accept-Encoding header is set
 func BuildHeaders(apiKey string) map[string]string {
 	headers := map[string]string{
-		"Content-Type": "application/json",
+		"Content-Type":    "application/json",
+		"Accept-Encoding": "gzip, deflate, br", // Request compression (net/http handles decompression automatically)
 	}
 	if apiKey != "" {
 		headers["Authorization"] = fmt.Sprintf("ApiKey %s", apiKey)
@@ -29,6 +31,9 @@ func BuildHeaders(apiKey string) map[string]string {
 func GetServerURL(serverURL string) string {
 	if serverURL == "" {
 		serverURL = os.Getenv("AIQA_SERVER_URL")
+		if serverURL == "" {
+			serverURL = "https://server-aiqa.winterwell.com"
+		}
 	}
 	// Remove all trailing slashes
 	return strings.TrimRight(serverURL, "/")
@@ -47,6 +52,7 @@ func GetAPIKey(apiKey string) string {
 var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // makeRequest performs an HTTP request with common error handling
+// Note: net/http automatically handles gzip/deflate decompression when Accept-Encoding header is set
 func makeRequest(ctx context.Context, method, url string, body interface{}, apiKey string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -89,4 +95,63 @@ func parseJSONResponse(resp *http.Response, result interface{}) error {
 	}
 
 	return nil
+}
+
+// FormatHTTPError formats an HTTP error message from a response object
+func FormatHTTPError(resp *http.Response, operation string) string {
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	errorText := string(body)
+	if errorText == "" {
+		errorText = "Unknown error"
+	}
+	return fmt.Sprintf("Failed to %s: %d %s - %s", operation, resp.StatusCode, resp.Status, errorText)
+}
+
+// GetOrganisation gets organisation information based on API key via an API call
+func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiKey string) (map[string]interface{}, error) {
+	url := GetServerURL(serverURL)
+	key := GetAPIKey(apiKey)
+	
+	apiURL := fmt.Sprintf("%s/organisation/%s", url, organisationID)
+	resp, err := makeRequest(ctx, "GET", apiURL, nil, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get organisation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(FormatHTTPError(resp, "get organisation"))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode organisation response: %w", err)
+	}
+
+	return result, nil
+}
+
+// GetAPIKeyInfo gets API key information via an API call
+func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey string) (map[string]interface{}, error) {
+	url := GetServerURL(serverURL)
+	key := GetAPIKey(apiKey)
+	
+	apiURL := fmt.Sprintf("%s/api-key/%s", url, apiKeyID)
+	resp, err := makeRequest(ctx, "GET", apiURL, nil, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get api key info: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(FormatHTTPError(resp, "get api key info"))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode api key info response: %w", err)
+	}
+
+	return result, nil
 }

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -29,6 +30,8 @@ var (
 	samplingRate   float64 = 1.0  // Default: sample all traces
 	componentTag   string  = ""   // Component tag to add to all spans
 	tracingEnabled bool    = true // Whether tracing is enabled (set to false if env vars missing)
+	initialized    bool    = false // Whether tracing has been initialized (lazy initialization)
+	initMutex      sync.Mutex // Mutex for thread-safe lazy initialization
 )
 
 func init() {
@@ -85,15 +88,63 @@ type TracingOptions struct {
 	FilterOutput func(interface{}) interface{}
 }
 
+// GetAIQAClient initializes and returns the AIQA client singleton.
+// This function is called automatically when WithTracing is first used, so you typically
+// don't need to call it explicitly. However, you can call it manually if you want to:
+// - Check if tracing is enabled (IsTracingEnabled())
+// - Initialize before the first WithTracing usage
+// - Access the client state for advanced usage
+//
+// The function loads environment variables (AIQA_SERVER_URL, AIQA_API_KEY, AIQA_COMPONENT_TAG)
+// and initializes the tracing system.
+//
+// The function is idempotent - calling it multiple times is safe and will only initialize once.
+func GetAIQAClient() error {
+	return ensureTracingInitialized("", "", nil)
+}
+
 // InitTracing initializes the OpenTelemetry tracer provider with AIQA exporter
 // samplingRate: value between 0 and 1, where 0 = tracing is off, 1 = trace all
 // If not provided, reads from AIQA_SAMPLING_RATE environment variable (default: 1.0)
 // If a TracerProvider already exists, it will add the AIQA exporter to it instead of creating a new one.
 // If AIQA_SERVER_URL or AIQA_API_KEY are not set, tracing will be gracefully disabled
 // (functions will execute normally without tracing overhead).
+//
+// Note: This function is now a wrapper around ensureTracingInitialized for backward compatibility.
+// For lazy initialization, use GetAIQAClient() or just use WithTracing (which calls it automatically).
 func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
+	var rate *float64
+	if len(samplingRateArg) > 0 {
+		rate = &samplingRateArg[0]
+	}
+	return ensureTracingInitialized(serverURL, apiKey, rate)
+}
+
+// ensureTracingInitialized ensures tracing is initialized (lazy initialization)
+// Thread-safe: uses mutex to ensure initialization only happens once
+func ensureTracingInitialized(serverURL, apiKey string, samplingRateArg *float64) error {
+	initMutex.Lock()
+	defer initMutex.Unlock()
+
+	// Already initialized, return early
+	if initialized {
+		return nil
+	}
+
+	// Mark as initialized before actual initialization to prevent retry loops on error
+	initialized = true
+
+	// Now do the actual initialization
+	return doInitTracing(serverURL, apiKey, samplingRateArg)
+}
+
+// doInitTracing performs the actual tracing initialization
+func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 	if serverURL == "" {
 		serverURL = os.Getenv("AIQA_SERVER_URL")
+		if serverURL == "" {
+			serverURL = "https://server-aiqa.winterwell.com"
+		}
 	}
 	if apiKey == "" {
 		apiKey = os.Getenv("AIQA_API_KEY")
@@ -151,8 +202,8 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 	tracingEnabled = true
 
 	// Set sampling rate
-	if len(samplingRateArg) > 0 {
-		samplingRate = samplingRateArg[0]
+	if samplingRateArg != nil {
+		samplingRate = *samplingRateArg
 	} else {
 		if envRate := os.Getenv("AIQA_SAMPLING_RATE"); envRate != "" {
 			if rate, err := strconv.ParseFloat(envRate, 64); err == nil {
@@ -281,6 +332,12 @@ func WithTracing(fn interface{}, options ...TracingOptions) interface{} {
 // wrapFunction wraps a function to automatically create spans
 func wrapFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt TracingOptions) interface{} {
 	wrapper := reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
+		// Lazy initialization: ensure tracing is initialized before creating spans
+		// This is called lazily when the function runs, not at decorator definition time
+		if !initialized {
+			_ = ensureTracingInitialized("", "", nil)
+		}
+
 		// If tracing is disabled, just execute the function without creating spans
 		if !tracingEnabled || tracer == nil {
 			return fnValue.Call(args)
