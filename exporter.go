@@ -18,8 +18,8 @@ type SerializableSpan struct {
 	Name                   string                 `json:"name"`
 	Kind                   int                    `json:"kind"`
 	ParentSpanID           string                 `json:"parentSpanId,omitempty"`
-	StartTime              [2]int64               `json:"startTime"`
-	EndTime                [2]int64               `json:"endTime"`
+	StartTime              int64                  `json:"startTime"`
+	EndTime                *int64                 `json:"endTime,omitempty"`
 	Status                 SpanStatus             `json:"status"`
 	Attributes             map[string]interface{} `json:"attributes"`
 	Links                  []SpanLink             `json:"links"`
@@ -28,7 +28,7 @@ type SerializableSpan struct {
 	TraceID                string                 `json:"traceId"`
 	SpanID                 string                 `json:"spanId"`
 	TraceFlags             byte                   `json:"traceFlags"`
-	Duration               [2]int64               `json:"duration"`
+	Duration               *int64                 `json:"duration,omitempty"`
 	Ended                  bool                   `json:"ended"`
 	InstrumentationLibrary InstrumentationLibrary `json:"instrumentationLibrary"`
 }
@@ -50,7 +50,7 @@ type SpanContext struct {
 
 type SpanEvent struct {
 	Name       string                 `json:"name"`
-	Time       [2]int64               `json:"time"`
+	Time       int64                  `json:"time"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
 }
 
@@ -263,15 +263,15 @@ func (e *AIQAExporter) addToBuffer(spans []trace.ReadOnlySpan) {
 func (e *AIQAExporter) serializeSpan(span trace.ReadOnlySpan) SerializableSpan {
 	spanContext := span.SpanContext()
 
-	// Convert start/end times to [seconds, nanoseconds] format
+	// Convert start/end times to epoch milliseconds
 	startTime := span.StartTime()
 	endTime := span.EndTime()
-
-	// Convert to Unix timestamp with nanoseconds
-	startUnix := startTime.Unix()
-	startNano := int64(startTime.Nanosecond())
-	endUnix := endTime.Unix()
-	endNano := int64(endTime.Nanosecond())
+	startMillis := startTime.UnixMilli()
+	var endMillis *int64
+	if !endTime.IsZero() {
+		em := endTime.UnixMilli()
+		endMillis = &em
+	}
 
 	attributes := make(map[string]interface{})
 	for _, kv := range span.Attributes() {
@@ -312,11 +312,10 @@ func (e *AIQAExporter) serializeSpan(span trace.ReadOnlySpan) SerializableSpan {
 			value := kv.Value.AsInterface()
 			eventAttrs[key] = applyDataFilters(key, value)
 		}
-		eventUnix := event.Time.Unix()
-		eventNano := int64(event.Time.Nanosecond())
+		eventMillis := event.Time.UnixMilli()
 		events = append(events, SpanEvent{
 			Name:       event.Name,
-			Time:       [2]int64{eventUnix, eventNano},
+			Time:       eventMillis,
 			Attributes: eventAttrs,
 		})
 	}
@@ -326,12 +325,18 @@ func (e *AIQAExporter) serializeSpan(span trace.ReadOnlySpan) SerializableSpan {
 		parentSpanID = span.Parent().SpanID().String()
 	}
 
+	var duration *int64
+	if endMillis != nil {
+		d := *endMillis - startMillis
+		duration = &d
+	}
+
 	return SerializableSpan{
 		Name:         span.Name(),
 		Kind:         int(span.SpanKind()),
 		ParentSpanID: parentSpanID,
-		StartTime:    [2]int64{startUnix, startNano},
-		EndTime:      [2]int64{endUnix, endNano},
+		StartTime:    startMillis,
+		EndTime:      endMillis,
 		Status: SpanStatus{
 			Code:    int(span.Status().Code),
 			Message: span.Status().Description,
@@ -343,7 +348,7 @@ func (e *AIQAExporter) serializeSpan(span trace.ReadOnlySpan) SerializableSpan {
 		TraceID:    spanContext.TraceID().String(),
 		SpanID:     spanContext.SpanID().String(),
 		TraceFlags: byte(spanContext.TraceFlags()),
-		Duration:   [2]int64{endUnix - startUnix, endNano - startNano},
+		Duration:   duration,
 		Ended:      span.EndTime().After(span.StartTime()),
 		InstrumentationLibrary: InstrumentationLibrary{
 			Name:    span.InstrumentationLibrary().Name,

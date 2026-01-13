@@ -112,7 +112,7 @@ func FormatHTTPError(resp *http.Response, operation string) string {
 func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiKey string) (map[string]interface{}, error) {
 	url := GetServerURL(serverURL)
 	key := GetAPIKey(apiKey)
-	
+
 	apiURL := fmt.Sprintf("%s/organisation/%s", url, organisationID)
 	resp, err := makeRequest(ctx, "GET", apiURL, nil, key)
 	if err != nil {
@@ -121,7 +121,7 @@ func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiK
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(FormatHTTPError(resp, "get organisation"))
+		return nil, fmt.Errorf("%s", FormatHTTPError(resp, "get organisation"))
 	}
 
 	var result map[string]interface{}
@@ -136,7 +136,7 @@ func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiK
 func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey string) (map[string]interface{}, error) {
 	url := GetServerURL(serverURL)
 	key := GetAPIKey(apiKey)
-	
+
 	apiURL := fmt.Sprintf("%s/api-key/%s", url, apiKeyID)
 	resp, err := makeRequest(ctx, "GET", apiURL, nil, key)
 	if err != nil {
@@ -145,7 +145,7 @@ func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(FormatHTTPError(resp, "get api key info"))
+		return nil, fmt.Errorf("%s", FormatHTTPError(resp, "get api key info"))
 	}
 
 	var result map[string]interface{}
