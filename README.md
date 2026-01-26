@@ -17,7 +17,7 @@ go get github.com/winterwell/aiqa-client-go
 Or specify a version:
 
 ```bash
-go get github.com/winterwell/aiqa-client-go@v0.4.1
+go get github.com/winterwell/aiqa-client-go@v0.6.2
 ```
 
 ### From Source
@@ -32,10 +32,12 @@ go mod download
 
 1. Set environment variables (or pass them to `InitTracing`):
 ```bash
-export AIQA_SERVER_URL=http://localhost:3000
+export AIQA_SERVER_URL=http://localhost:4001
 export AIQA_API_KEY=your-api-key
 export AIQA_COMPONENT_TAG=mynamespace.mysystem  # Optional: component tag for all spans
 ```
+
+See `env.example` for a complete list of all available environment variables.
 
 **Note:** If `AIQA_SERVER_URL` or `AIQA_API_KEY` are not set, tracing will be automatically disabled. You'll see one warning message at the start, and your application will continue to run without tracing. You can check if tracing is enabled via `aiqa.IsTracingEnabled()`.
 
@@ -141,15 +143,38 @@ if aiqa.IsTracingEnabled() {
 }
 ```
 
+### Getting Server URL
+
+You can retrieve the configured server URL:
+
+```go
+serverUrl := aiqa.GetServerURL("")
+fmt.Printf("Logging to server: %s\n", serverUrl)
+```
+
 ## Configuration
 
 The client can be configured via environment variables or by passing parameters to `InitTracing`:
 
+### Required
 - `AIQA_SERVER_URL`: URL of the AIQA server (default: empty, must be set)
-- `AIQA_API_KEY`: API key for authentication (default: empty)
-- `AIQA_COMPONENT_TAG`: Component tag to add to all spans (e.g., "mynamespace.mysystem"). Optional.
-- `AIQA_SAMPLING_RATE`: Sampling rate between 0 and 1 (default: 1.0 = sample all). Optional.
-- `AIQA_DATA_FILTERS`: Comma-separated list of data filters to apply. Default: "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys". Set to "false" to disable all filters. Optional.
+- `AIQA_API_KEY`: API key for authentication (default: empty). Get your API key from the AIQA Webapp: click on your organisation, then click on "API Keys".
+
+### Optional
+- `AIQA_COMPONENT_TAG`: Component tag to add to all spans (e.g., "mynamespace.mysystem"). Allows filtering by which component/system generated the spans.
+- `AIQA_ORGANISATION_ID`: Your organisation ID within AIQA. Used when retrieving spans from the server. Not needed for tracing, which uses the API key to authenticate.
+- `AIQA_SAMPLING_RATE`: Sampling rate between 0 and 1 (default: 1.0 = sample all). Set to a value between 0.0 and 1.0 to sample a fraction of traces (e.g., 0.1 = 10%). Sampling is done based on the trace-id, so a whole trace is either sampled or not sampled.
+- `AIQA_DATA_FILTERS`: Comma-separated list of data filters to apply. Default: "RemovePasswords, RemoveJWT, RemoveAuthHeaders, RemoveAPIKeys". Set to "false" to disable all filters.
+- `AIQA_MAX_OBJECT_STR_CHARS`: Maximum size for an object string representation in characters (i.e. max input/output size for a span). Default: 1m (1,048,576 characters). Supports units: k (kilo), m (mega), g (giga), or plain number.
+- `AIQA_MAX_BUFFER_SPANS`: Maximum number of spans to buffer in memory before sending to server. Default: 10000. When the buffer is full, new spans will be dropped and a warning will be logged.
+- `AIQA_FLUSH_INTERVAL_SECONDS`: How often to flush spans to the server in seconds. Default: 5.
+- `AIQA_MAX_BUFFER_SIZE_BYTES`: Maximum total buffer size in bytes (memory limit). Default: 100m. When the buffer size exceeds this limit, the buffer will be flushed and a warning will be logged. Supports units: k (kilo), m (mega), g (giga), or plain number.
+
+### OTLP Compatibility
+
+The client also supports standard OpenTelemetry environment variables for compatibility:
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: Alternative to `AIQA_SERVER_URL`
+- `OTEL_EXPORTER_OTLP_HEADERS`: Alternative to `AIQA_API_KEY` (format: "Authorization=ApiKey <key>")
 
 ## Flushing Spans
 
@@ -339,10 +364,15 @@ export AIQA_DATA_FILTERS="RemovePasswords, RemoveAPIKeys"
 ## Running the Example
 
 ```bash
+# First setup .env using env.example as a template
+cp env.example .env
+# Edit .env with your server URL and API key
+
+# Then run the example
 go run examples/example.go
 ```
 
-Make sure `AIQA_SERVER_URL` and `AIQA_API_KEY` are set in your environment.
+The example will show which server it's logging to and demonstrate various tracing features. After running, check your AIQA server's traces view to see the generated spans.
 
 ## Versioning and Publishing
 
@@ -350,7 +380,7 @@ Make sure `AIQA_SERVER_URL` and `AIQA_API_KEY` are set in your environment.
 
 The client uses semantic versioning. Version information is tracked in:
 - `version.json` - Contains version, git commit, and date (managed by `set-version-json.sh` in the repo root)
-- Git tags - Used by Go modules for version resolution (e.g., `v0.4.1`)
+- Git tags - Used by Go modules for version resolution (e.g., `v0.6.2`)
 
 ### Publishing a New Version
 
@@ -361,23 +391,33 @@ The client uses semantic versioning. Version information is tracked in:
    ```
    This updates `version.json` files across all components.
 
-2. **Create and push a git tag:**
+2. **Publish using the publish script:**
+   ```bash
+   # The publish.sh script will:
+   # - Read the version from version.json
+   # - Create and push a git tag
+   # - Trigger Go module indexing
+   ./publish.sh
+   ```
+
+   Or manually:
    ```bash
    # Tag the current commit with the new version
-   git tag v0.4.2
-   git push origin v0.4.2
+   git tag v0.6.2
+   git push origin v0.6.2
    ```
 
 3. **Verify the release:**
    - Check that the tag appears on GitHub: https://github.com/winterwell/aiqa-client-go/tags
    - Go modules will automatically pick up the new version via the Go proxy
-   - Users can then install with: `go get github.com/winterwell/aiqa-client-go@v0.4.2`
+   - Users can then install with: `go get github.com/winterwell/aiqa-client-go@v0.6.2`
+   - Check https://pkg.go.dev/github.com/winterwell/aiqa-client-go for the updated module (may take a few minutes)
 
 ### Version Format
 
-- Follow semantic versioning: `MAJOR.MINOR.PATCH` (e.g., `0.4.1`)
-- Pre-release versions: `v0.4.2-alpha.1`, `v0.4.2-beta.1`
-- Git tags must start with `v` (e.g., `v0.4.1`)
+- Follow semantic versioning: `MAJOR.MINOR.PATCH` (e.g., `0.6.2`)
+- Pre-release versions: `v0.6.3-alpha.1`, `v0.6.3-beta.1`
+- Git tags must start with `v` (e.g., `v0.6.2`)
 
 ### Checking Current Version
 
