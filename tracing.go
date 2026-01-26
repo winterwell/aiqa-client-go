@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -24,14 +26,17 @@ import (
 )
 
 var (
-	tracerProvider *sdktrace.TracerProvider
-	tracer         trace.Tracer
-	exporter       *AIQAExporter
-	samplingRate   float64 = 1.0  // Default: sample all traces
-	componentTag   string  = ""   // Component tag to add to all spans
-	tracingEnabled bool    = true // Whether tracing is enabled (set to false if env vars missing)
-	initialized    bool    = false // Whether tracing has been initialized (lazy initialization)
-	initMutex      sync.Mutex // Mutex for thread-safe lazy initialization
+	tracerProvider        *sdktrace.TracerProvider
+	tracer                trace.Tracer
+	exporter              sdktrace.SpanExporter
+	samplingRate          float64    = 1.0   // Default: sample all traces
+	componentTag          string     = ""    // Component tag to add to all spans
+	tracingEnabled        bool       = true  // Whether tracing is enabled (set to false if env vars missing)
+	initialized           bool       = false // Whether tracing has been initialized (lazy initialization)
+	initMutex             sync.Mutex         // Mutex for thread-safe lazy initialization
+	defaultIgnorePatterns []string   = []string{"_*"} // Default ignore patterns (filters properties starting with '_')
+	ignoreRecursive       bool       = true  // Whether to apply ignore patterns recursively
+	clientMutex           sync.RWMutex       // Mutex for thread-safe access to client state
 )
 
 func init() {
@@ -171,8 +176,6 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 			tracerProvider = nil
 		}
 		if exporter != nil {
-			// Disable exporter to prevent sending spans
-			exporter.Disable()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = exporter.Shutdown(ctx)
@@ -192,7 +195,6 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 			tracerProvider = nil
 		}
 		if exporter != nil {
-			exporter.Disable()
 			_ = exporter.Shutdown(ctx)
 			exporter = nil
 		}
@@ -219,7 +221,41 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 		samplingRate = 1
 	}
 
-	exporter = NewAIQAExporter(serverURL, apiKey, 5)
+	// OTLP HTTP exporter requires the full endpoint URL including /v1/traces
+	// Ensure serverURL doesn't have trailing slash or /v1/traces, then append /v1/traces
+	baseURL := strings.TrimRight(serverURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1/traces") {
+		endpoint = baseURL
+	} else {
+		endpoint = fmt.Sprintf("%s/v1/traces", baseURL)
+	}
+
+	// Get timeout from environment variable (in seconds)
+	// Supports OTEL_EXPORTER_OTLP_TIMEOUT (standard) or AIQA_EXPORT_TIMEOUT (custom)
+	// Default is 30 seconds (more generous than OTLP default of 10s)
+	timeout := 30 * time.Second
+	if otlpTimeout := os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"); otlpTimeout != "" {
+		if timeoutSec, err := strconv.ParseFloat(otlpTimeout, 64); err == nil {
+			timeout = time.Duration(timeoutSec * float64(time.Second))
+		}
+	}
+
+	// Build headers for authentication
+	headers := map[string]string{
+		"Authorization": fmt.Sprintf("ApiKey %s", apiKey),
+	}
+
+	otlpExporter, err := otlptracehttp.New(
+		context.Background(),
+		otlptracehttp.WithEndpoint(endpoint),
+		otlptracehttp.WithHeaders(headers),
+		otlptracehttp.WithTimeout(timeout),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create OTLP exporter: %w", err)
+	}
+	exporter = otlpExporter
 
 	// Check if a TracerProvider is already set and not shut down
 	existingProvider := otel.GetTracerProvider()
@@ -266,12 +302,7 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 // FlushSpans flushes all pending spans to the server
 func FlushSpans(ctx context.Context) error {
 	if tracerProvider != nil {
-		if err := tracerProvider.ForceFlush(ctx); err != nil {
-			return err
-		}
-	}
-	if exporter != nil {
-		return exporter.Flush(ctx)
+		return tracerProvider.ForceFlush(ctx)
 	}
 	return nil
 }
@@ -286,12 +317,8 @@ func ShutdownTracing(ctx context.Context) error {
 		}
 		tracerProvider = nil
 	}
-	if exporter != nil {
-		if err := exporter.Shutdown(ctx); err != nil {
-			return err
-		}
-		exporter = nil
-	}
+	// Exporter is shut down as part of tracerProvider.Shutdown()
+	exporter = nil
 	tracer = nil
 	tracingEnabled = false
 	return nil
@@ -400,7 +427,96 @@ func wrapFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt
 	return wrapper.Interface()
 }
 
+// matchesIgnorePattern checks if a key matches any pattern in the ignore list.
+// Supports simple wildcards (e.g., "_*" matches "_apple", "_fruit").
+func matchesIgnorePattern(key string, ignorePatterns []string) bool {
+	for _, pattern := range ignorePatterns {
+		// Simple wildcard matching
+		if strings.Contains(pattern, "*") || strings.Contains(pattern, "?") {
+			// Use simple glob matching
+			if matched, _ := filepath.Match(pattern, key); matched {
+				return true
+			}
+		} else {
+			// Exact match for non-wildcard patterns
+			if key == pattern {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// applyIgnorePatterns applies ignore patterns to a map, optionally recursively.
+// Supports string keys, wildcard patterns (*), and list of patterns.
+func applyIgnorePatterns(dataDict map[string]interface{}, ignorePatterns []string, recursive bool, maxDepth, currentDepth int) map[string]interface{} {
+	// Safety check: prevent infinite loops from extremely deep nesting
+	if currentDepth >= maxDepth {
+		return dataDict
+	}
+
+	// If no patterns, return copy (no filtering needed, even if recursive=true)
+	if len(ignorePatterns) == 0 {
+		result := make(map[string]interface{})
+		for k, v := range dataDict {
+			result[k] = v
+		}
+		return result
+	}
+
+	result := make(map[string]interface{})
+	for key, value := range dataDict {
+		// Skip keys that match ignore patterns
+		if matchesIgnorePattern(key, ignorePatterns) {
+			continue
+		}
+
+		// Recursively process nested dictionaries if recursive=true
+		if recursive {
+			if nestedMap, ok := value.(map[string]interface{}); ok {
+				result[key] = applyIgnorePatterns(nestedMap, ignorePatterns, recursive, maxDepth, currentDepth+1)
+			} else {
+				result[key] = value
+			}
+		} else {
+			result[key] = value
+		}
+	}
+
+	return result
+}
+
+// mergeWithDefaultIgnorePatterns merges user-provided ignore patterns with client's default ignore patterns.
+func mergeWithDefaultIgnorePatterns(ignorePatterns []string) []string {
+	clientMutex.RLock()
+	defaultPatterns := make([]string, len(defaultIgnorePatterns))
+	copy(defaultPatterns, defaultIgnorePatterns)
+	clientMutex.RUnlock()
+
+	if ignorePatterns == nil {
+		return defaultPatterns
+	}
+
+	// Merge patterns, avoiding duplicates
+	merged := make([]string, len(defaultPatterns))
+	copy(merged, defaultPatterns)
+	for _, pattern := range ignorePatterns {
+		found := false
+		for _, existing := range merged {
+			if existing == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, pattern)
+		}
+	}
+	return merged
+}
+
 // prepareInput prepares function input for span attributes
+// Applies filter_input first, then applies ignore_input with default patterns merged
 func prepareInput(args []reflect.Value, opt TracingOptions) interface{} {
 	if len(args) == 0 {
 		return nil
@@ -418,29 +534,44 @@ func prepareInput(args []reflect.Value, opt TracingOptions) interface{} {
 		return nil
 	}
 
+	var result interface{}
 	if len(filteredArgs) == 1 {
-		result := filteredArgs[0].Interface()
-		if opt.FilterInput != nil {
-			result = opt.FilterInput(result)
+		result = filteredArgs[0].Interface()
+	} else {
+		// Multiple args - combine into map
+		resultMap := make(map[string]interface{})
+		for i, arg := range filteredArgs {
+			key := fmt.Sprintf("arg%d", i)
+			resultMap[key] = arg.Interface()
 		}
-		return result
+		result = resultMap
 	}
 
-	// Multiple args - combine into map
-	result := make(map[string]interface{})
-	for i, arg := range filteredArgs {
-		key := fmt.Sprintf("arg%d", i)
-		result[key] = arg.Interface()
-	}
-
+	// Apply filter_input if provided
 	if opt.FilterInput != nil {
-		result = opt.FilterInput(result).(map[string]interface{})
+		result = opt.FilterInput(result)
+	}
+
+	// Merge with default ignore patterns
+	mergedIgnoreInput := mergeWithDefaultIgnorePatterns(opt.IgnoreInput)
+
+	// Apply ignore_input patterns if result is a map
+	if resultMap, ok := result.(map[string]interface{}); ok && len(mergedIgnoreInput) > 0 {
+		clientMutex.RLock()
+		recursive := ignoreRecursive
+		clientMutex.RUnlock()
+		result = applyIgnorePatterns(resultMap, mergedIgnoreInput, recursive, 100, 0)
+		// If result is empty after filtering, return nil
+		if len(result.(map[string]interface{})) == 0 {
+			return nil
+		}
 	}
 
 	return result
 }
 
 // prepareOutput prepares function output for span attributes
+// Applies filter_output first, then applies ignore_output with default patterns merged
 func prepareOutput(results []reflect.Value, opt TracingOptions) interface{} {
 	if len(results) == 0 {
 		return nil
@@ -458,23 +589,42 @@ func prepareOutput(results []reflect.Value, opt TracingOptions) interface{} {
 		return nil
 	}
 
+	var result interface{}
 	if len(filteredResults) == 1 {
-		result := filteredResults[0].Interface()
-		if opt.FilterOutput != nil {
+		result = filteredResults[0].Interface()
+	} else {
+		// Multiple results - combine into map
+		resultMap := make(map[string]interface{})
+		for i, res := range filteredResults {
+			key := fmt.Sprintf("result%d", i)
+			resultMap[key] = res.Interface()
+		}
+		result = resultMap
+	}
+
+	// Apply filter_output if provided
+	if opt.FilterOutput != nil {
+		// Make a copy if it's a map to avoid mutating the original
+		if resultMap, ok := result.(map[string]interface{}); ok {
+			resultMapCopy := make(map[string]interface{})
+			for k, v := range resultMap {
+				resultMapCopy[k] = v
+			}
+			result = opt.FilterOutput(resultMapCopy)
+		} else {
 			result = opt.FilterOutput(result)
 		}
-		return result
 	}
 
-	// Multiple results - combine into map
-	result := make(map[string]interface{})
-	for i, res := range filteredResults {
-		key := fmt.Sprintf("result%d", i)
-		result[key] = res.Interface()
-	}
+	// Merge with default ignore patterns
+	mergedIgnoreOutput := mergeWithDefaultIgnorePatterns(opt.IgnoreOutput)
 
-	if opt.FilterOutput != nil {
-		result = opt.FilterOutput(result).(map[string]interface{})
+	// Apply ignore_output patterns if result is a map
+	if resultMap, ok := result.(map[string]interface{}); ok && len(mergedIgnoreOutput) > 0 {
+		clientMutex.RLock()
+		recursive := ignoreRecursive
+		clientMutex.RUnlock()
+		result = applyIgnorePatterns(resultMap, mergedIgnoreOutput, recursive, 100, 0)
 	}
 
 	return result
@@ -882,6 +1032,48 @@ func SetComponentTag(tag string) {
 // Tracing is disabled if AIQA_SERVER_URL or AIQA_API_KEY are not set.
 func IsTracingEnabled() bool {
 	return tracingEnabled
+}
+
+// GetDefaultIgnorePatterns returns the default ignore patterns applied to all traced inputs and outputs.
+// Default: ["_*"] (filters properties starting with '_')
+// Returns a copy of the patterns to prevent external modification
+func GetDefaultIgnorePatterns() []string {
+	clientMutex.RLock()
+	defer clientMutex.RUnlock()
+	result := make([]string, len(defaultIgnorePatterns))
+	copy(result, defaultIgnorePatterns)
+	return result
+}
+
+// SetDefaultIgnorePatterns sets the default ignore patterns applied to all traced inputs and outputs.
+// Set to nil or empty slice to disable default ignore patterns.
+// Supports wildcards (e.g., "_*" matches "_apple", "_fruit").
+func SetDefaultIgnorePatterns(patterns []string) {
+	clientMutex.Lock()
+	defer clientMutex.Unlock()
+	if patterns == nil {
+		defaultIgnorePatterns = []string{}
+	} else {
+		defaultIgnorePatterns = make([]string, len(patterns))
+		copy(defaultIgnorePatterns, patterns)
+	}
+}
+
+// GetIgnoreRecursive returns whether ignore patterns are applied recursively to nested objects.
+// Default: true (recursive filtering enabled)
+func GetIgnoreRecursive() bool {
+	clientMutex.RLock()
+	defer clientMutex.RUnlock()
+	return ignoreRecursive
+}
+
+// SetIgnoreRecursive sets whether ignore patterns are applied recursively to nested objects.
+// When true (default), ignore patterns are applied at all nesting levels.
+// When false, ignore patterns are only applied to top-level keys.
+func SetIgnoreRecursive(recursive bool) {
+	clientMutex.Lock()
+	defer clientMutex.Unlock()
+	ignoreRecursive = recursive
 }
 
 // GetTraceId gets the current trace ID as a hexadecimal string (32 characters).

@@ -424,6 +424,21 @@ go test ./...
 go build
 ```
 
+### Using Locally in Other Projects
+
+When developing the client and testing it in another Go project, use the `replace` directive. This is the standard Go way to use local code without publishing:
+
+1. In your consuming project's `go.mod`, add:
+   ```bash
+   replace github.com/winterwell/aiqa-client-go => /absolute/path/to/aiqa-client-go
+   ```
+
+2. Run `go mod tidy` in your consuming project
+
+3. Your project will now use the local version - any changes you make will be immediately available
+
+4. When done, remove the `replace` line to go back to using the published version
+
 ### Contributing
 
 Contributions are welcome! Please open an issue or pull request on [GitHub](https://github.com/winterwell/aiqa-client-go).

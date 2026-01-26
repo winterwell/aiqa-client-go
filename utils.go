@@ -14,37 +14,99 @@ import (
 
 // BuildHeaders builds HTTP headers for AIQA API requests
 // Note: net/http automatically handles gzip/deflate decompression when Accept-Encoding header is set
+// Checks AIQA_API_KEY first, then falls back to OTEL_EXPORTER_OTLP_HEADERS if not set
 func BuildHeaders(apiKey string) map[string]string {
 	headers := map[string]string{
 		"Content-Type":    "application/json",
 		"Accept-Encoding": "gzip, deflate, br", // Request compression (net/http handles decompression automatically)
 	}
+	
+	// Check parameter first
 	if apiKey != "" {
 		headers["Authorization"] = fmt.Sprintf("ApiKey %s", apiKey)
-	} else if envKey := os.Getenv("AIQA_API_KEY"); envKey != "" {
-		headers["Authorization"] = fmt.Sprintf("ApiKey %s", envKey)
+		return headers
 	}
+	
+	// Check AIQA_API_KEY env var
+	if envKey := os.Getenv("AIQA_API_KEY"); envKey != "" {
+		headers["Authorization"] = fmt.Sprintf("ApiKey %s", envKey)
+		return headers
+	}
+	
+	// Fallback to OTLP headers (format: "key1=value1,key2=value2")
+	if otlpHeaders := os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"); otlpHeaders != "" {
+		// Parse comma-separated key=value pairs
+		for _, headerPair := range strings.Split(otlpHeaders, ",") {
+			headerPair = strings.TrimSpace(headerPair)
+			if idx := strings.Index(headerPair, "="); idx > 0 {
+				key := strings.TrimSpace(headerPair[:idx])
+				value := strings.TrimSpace(headerPair[idx+1:])
+				if strings.ToLower(key) == "authorization" {
+					headers["Authorization"] = value
+				} else {
+					headers[key] = value
+				}
+			}
+		}
+	}
+	
 	return headers
 }
 
 // GetServerURL gets server URL from parameter or environment variable, with trailing slashes removed
+// Checks AIQA_SERVER_URL first, then falls back to OTEL_EXPORTER_OTLP_ENDPOINT if not set
 func GetServerURL(serverURL string) string {
-	if serverURL == "" {
-		serverURL = os.Getenv("AIQA_SERVER_URL")
-		if serverURL == "" {
-			serverURL = "https://server-aiqa.winterwell.com"
-		}
+	// Check parameter first
+	if serverURL != "" {
+		return strings.TrimRight(serverURL, "/")
 	}
-	// Remove all trailing slashes
-	return strings.TrimRight(serverURL, "/")
+	
+	// Check AIQA_SERVER_URL env var
+	if url := os.Getenv("AIQA_SERVER_URL"); url != "" {
+		return strings.TrimRight(url, "/")
+	}
+	
+	// Fallback to OTLP endpoint
+	if url := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); url != "" {
+		return strings.TrimRight(url, "/")
+	}
+	
+	// Default fallback
+	return "https://server-aiqa.winterwell.com"
 }
 
 // GetAPIKey gets API key from parameter or environment variable
+// Checks AIQA_API_KEY first, then falls back to OTEL_EXPORTER_OTLP_HEADERS if not set
 func GetAPIKey(apiKey string) string {
-	if apiKey == "" {
-		apiKey = os.Getenv("AIQA_API_KEY")
+	// Check parameter first
+	if apiKey != "" {
+		return apiKey
 	}
-	return apiKey
+	
+	// Check AIQA_API_KEY env var
+	if envKey := os.Getenv("AIQA_API_KEY"); envKey != "" {
+		return envKey
+	}
+	
+	// Fallback to OTLP headers (look for Authorization header)
+	if otlpHeaders := os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"); otlpHeaders != "" {
+		for _, headerPair := range strings.Split(otlpHeaders, ",") {
+			headerPair = strings.TrimSpace(headerPair)
+			if idx := strings.Index(headerPair, "="); idx > 0 {
+				key := strings.TrimSpace(headerPair[:idx])
+				value := strings.TrimSpace(headerPair[idx+1:])
+				if strings.ToLower(key) == "authorization" {
+					// Extract API key from "ApiKey <key>" or just return the value
+					if strings.HasPrefix(value, "ApiKey ") {
+						return value[7:]
+					}
+					return value
+				}
+			}
+		}
+	}
+	
+	return ""
 }
 
 // HTTPClient is a shared HTTP client with timeout

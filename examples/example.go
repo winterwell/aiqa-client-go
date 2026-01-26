@@ -29,7 +29,7 @@ func main() {
 
 	// What server and org are we logging to?
 	serverUrl := aiqa.GetServerURL("")
-	fmt.Printf("Logging to server: %s`n", serverUrl)
+	fmt.Printf("Logging to server: %s\n", serverUrl)
 
 	// Example 1: Simple function
 	multiply := func(x, y int) int {
