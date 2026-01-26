@@ -76,7 +76,7 @@ func main() {
 	result4 := tracedOuter(10)
 	fmt.Printf("Nested result: %d\n", result4)
 
-	// Flush spans before exit
+	// Flush spans before exit (not needed in long-running processes)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := aiqa.FlushSpans(ctx); err != nil {

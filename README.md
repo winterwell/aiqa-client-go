@@ -62,11 +62,6 @@ func main() {
     if err != nil {
         panic(err)
     }
-    defer func() {
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-        defer cancel()
-        aiqa.ShutdownTracing(ctx)
-    }()
 
     // Wrap a function with tracing
     multiply := func(x, y int) int {
@@ -76,6 +71,15 @@ func main() {
     
     result := tracedMultiply(5, 3)
     fmt.Println(result)
+
+    // On a server or long-running process, the traces will be flushed and sent
+    // Here we will explicitly flush them
+    // Flush spans before exit (for short-lived processes)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := aiqa.FlushSpans(ctx); err != nil {
+        fmt.Printf("Failed to flush spans: %v\n", err)
+    }
 }
 ```
 
