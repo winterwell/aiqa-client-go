@@ -2,6 +2,7 @@ package aiqa
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 )
@@ -158,6 +159,32 @@ func TestExperimentRunner_RunExample(t *testing.T) {
 	// Should fail without a real server, but we're testing the function exists
 	if err == nil {
 		t.Log("RunExample succeeded (unexpected - may have real server)")
+	}
+}
+
+func TestExperimentRunner_RunExample_ErrStopEarly(t *testing.T) {
+	runner := NewExperimentRunner(ExperimentRunnerOptions{
+		DatasetId:      "test-dataset",
+		OrganisationId: "test-org",
+	})
+
+	ctx := context.Background()
+	example := Example{
+		Id:    "test-example",
+		Input: "test-input",
+	}
+
+	engine := func(input interface{}, parameters map[string]interface{}) (interface{}, error) {
+		return nil, ErrStopEarly
+	}
+
+	_, err := runner.RunExample(ctx, example, engine)
+	// Should return ErrStopEarly (may be wrapped if server call fails first)
+	if err == nil {
+		t.Error("RunExample should return error when engine returns ErrStopEarly")
+	}
+	if !errors.Is(err, ErrStopEarly) {
+		t.Logf("RunExample returned error (may be wrapped by server call): %v", err)
 	}
 }
 

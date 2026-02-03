@@ -2,6 +2,7 @@ package aiqa
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,13 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// Any error that starts with this prefix will be treated as a request to stop the experiment.
+const ERROR_PREFIX_STOP_EXPERIMENT = "STOP_EXPERIMENT"
+
+// ErrStopExperiment is returned by callMyCode to signal that Run() should stop the experiment Run early.
+// This can be used when callMyCode detects issues like connectivity problems.
+var ErrStopExperiment = errors.New(ERROR_PREFIX_STOP_EXPERIMENT)
 
 // ExperimentRunnerOptions contains options for creating an ExperimentRunner
 type ExperimentRunnerOptions struct {
@@ -385,25 +393,24 @@ func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, example Example, 
 
 // Run runs an engine function on all examples and scores the results
 // engine: function that takes input and parameters and returns output
-// scorer: optional function that scores the output given the example
 // Checks if results already exist for an example before calling RunExample, allowing experiments to be resumed.
-func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface{}, parameters map[string]interface{}) (interface{}, error), scorer func(output interface{}, example Example, parameters map[string]interface{}) (map[string]float64, error)) error {
+func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface{}, parameters map[string]interface{}) (interface{}, error)) (int, error) {
 	// Ensure experiment is loaded
 	if er.experiment == nil {
 		if er.experimentId != "" {
 			if _, err := er.LoadExperiment(ctx, er.experimentId); err != nil {
-				return fmt.Errorf("failed to load experiment: %w", err)
+				return 0, fmt.Errorf("failed to load experiment: %w", err)
 			}
 		} else {
 			if _, err := er.CreateExperiment(ctx, nil); err != nil {
-				return fmt.Errorf("failed to create experiment: %w", err)
+				return 0, fmt.Errorf("failed to create experiment: %w", err)
 			}
 		}
 	}
 
 	examples, err := er.GetExampleInputs(ctx, 0)
 	if err != nil {
-		return fmt.Errorf("failed to get examples: %w", err)
+		return 0, fmt.Errorf("failed to get examples: %w", err)
 	}
 
 	// Build a map of existing results by example ID for quick lookup
@@ -415,6 +422,7 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 	}
 
 	// run the experiment
+	cnt := 0
 	for _, example := range examples {
 		// Skip if results already exist for this example
 		if existingResults[example.Id] {
@@ -424,6 +432,11 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 
 		scores, err := er.RunExample(ctx, example, engine)
 		if err != nil {
+			// Check if callMyCode requested early termination
+			if errors.Is(err, ErrStopExperiment) || strings.HasPrefix(err.Error(), ERROR_PREFIX_STOP_EXPERIMENT) {
+				fmt.Printf("AIQA: Stopping early as requested by callMyCode: %v\n", err)
+				return cnt, err
+			}
 			fmt.Printf("AIQA: Error processing example %s: %v\n", example.Id, err)
 			continue
 		}
@@ -438,13 +451,15 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 				scores:  sr,
 			})
 		}
+		cnt++
 	}
 
-	return nil
+	return cnt, nil
 }
 
 func (er *ExperimentRunner) getLLMCallFn(model string) LLMCallFn {
 	if er.llmCallFn != nil {
+		// wrap with tracing
 		return WithTracing(er.llmCallFn, TracingOptions{Name: "LLMCallFn"}).(LLMCallFn)
 	}
 	// TODO refactor with llm as judge code to do api key based OpenAI
@@ -556,6 +571,10 @@ func (er *ExperimentRunner) runExampleWithParameters(
 			span.SetStatus(codes.Error, err.Error())
 		}
 		restoreEnv()
+		// Preserve ErrStopEarly so Run() can detect it
+		if errors.Is(err, ErrStopExperiment) || strings.HasPrefix(err.Error(), ERROR_PREFIX_STOP_EXPERIMENT) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("engine function failed: %w", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,17 +27,19 @@ import (
 )
 
 var (
-	tracerProvider        *sdktrace.TracerProvider
-	tracer                trace.Tracer
-	exporter              sdktrace.SpanExporter
-	samplingRate          float64      = 1.0            // Default: sample all traces
-	componentTag          string       = ""             // Component tag to add to all spans
-	tracingEnabled        bool         = true           // Whether tracing is enabled (set to false if env vars missing)
-	initialized           bool         = false          // Whether tracing has been initialized (lazy initialization)
-	initMutex             sync.Mutex                    // Mutex for thread-safe lazy initialization
-	defaultIgnorePatterns []string     = []string{"_*"} // Default ignore patterns (filters properties starting with '_')
-	ignoreRecursive       bool         = true           // Whether to apply ignore patterns recursively
-	clientMutex           sync.RWMutex                  // Mutex for thread-safe access to client state
+	tracerProvider         *sdktrace.TracerProvider
+	tracer                 trace.Tracer
+	exporter               sdktrace.SpanExporter
+	samplingRate           float64                                   = 1.0            // Default: sample all traces
+	componentTag           string                                    = ""             // Component tag to add to all spans
+	tracingEnabled         bool                                      = true           // Whether tracing is enabled (set to false if env vars missing)
+	initialized            bool                                      = false          // Whether tracing has been initialized (lazy initialization)
+	initMutex              sync.Mutex                                                 // Mutex for thread-safe lazy initialization
+	defaultIgnorePatterns  []string                                  = []string{"_*"} // Default ignore patterns (filters properties starting with '_')
+	ignoreRecursive        bool                                      = true           // Whether to apply ignore patterns recursively
+	clientMutex            sync.RWMutex                                               // Mutex for thread-safe access to client state
+	attachedProviders      = make(map[*sdktrace.TracerProvider]bool)                  // Track which providers we've already attached processors to (idempotency)
+	attachedProvidersMutex sync.RWMutex                                               // Mutex for attachedProviders map
 )
 
 func init() {
@@ -148,15 +151,12 @@ func ensureTracingInitialized(serverURL, apiKey string, samplingRateArg *float64
 }
 
 // doInitTracing performs the actual tracing initialization
+// We trust the caller to provide the correct serverURL, which normally excludes the /v1/traces path.
 func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
-	if serverURL == "" {
-		serverURL = os.Getenv("AIQA_SERVER_URL")
-		if serverURL == "" {
-			serverURL = "https://server-aiqa.winterwell.com"
-		}
-	}
+	// Use GetServerURL helper which checks AIQA_SERVER_URL, then OTEL_EXPORTER_OTLP_ENDPOINT, then default
+	serverURL = GetServerURL(serverURL)
 	if apiKey == "" {
-		apiKey = os.Getenv("AIQA_API_KEY")
+		apiKey = GetAPIKey(apiKey)
 	}
 
 	// Gracefully disable if required environment variables are not set
@@ -225,16 +225,6 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 		samplingRate = 1
 	}
 
-	// OTLP HTTP exporter requires the full endpoint URL including /v1/traces
-	// Ensure serverURL doesn't have trailing slash or /v1/traces, then append /v1/traces
-	baseURL := strings.TrimRight(serverURL, "/")
-	var endpoint string
-	if strings.HasSuffix(baseURL, "/v1/traces") {
-		endpoint = baseURL
-	} else {
-		endpoint = fmt.Sprintf("%s/v1/traces", baseURL)
-	}
-
 	// Get timeout from environment variable (in seconds)
 	// Supports OTEL_EXPORTER_OTLP_TIMEOUT (standard) or AIQA_EXPORT_TIMEOUT (custom)
 	// Default is 30 seconds (more generous than OTLP default of 10s)
@@ -252,7 +242,7 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 
 	otlpExporter, err := otlptracehttp.New(
 		context.Background(),
-		otlptracehttp.WithEndpoint(endpoint),
+		otlptracehttp.WithEndpoint(serverURL),
 		otlptracehttp.WithHeaders(headers),
 		otlptracehttp.WithTimeout(timeout),
 	)
@@ -261,14 +251,69 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 	}
 	exporter = otlpExporter
 
-	// Check if a TracerProvider is already set (e.g. by the application).
+	// Check if a TracerProvider is already set (e.g. by the application's own OTEL init).
 	existingProvider := otel.GetTracerProvider()
 
-	// Reuse any existing SDK TracerProvider so WithTracing spans use the same exporter(s).
+	// If user has their own OpenTelemetry initialization, not AIQA, then we add our AIQA exporter
+	// as an additional span processor. This means spans will be sent to both:
+	// 1. The user's existing exporter(s) (if any)
+	// 2. The AIQA exporter (to AIQA server)
+	// This allows AIQA tracing to work alongside existing OTEL setups without conflicts.
 	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok && sdkProvider != nil {
-		// Real provider already exists, add our span processor to it
+		// Real provider already exists - user has their own OTEL initialization
+
+		// Idempotency check: avoid adding duplicate processors if we've already attached to this provider
+		attachedProvidersMutex.RLock()
+		alreadyAttached := attachedProviders[sdkProvider]
+		attachedProvidersMutex.RUnlock()
+
+		if alreadyAttached {
+			// Already attached to this provider, skip to avoid duplicates
+			tracer = otel.Tracer(AIQATracerName)
+			return nil
+		}
+
+		// Check if user's OTEL init is already pointing to the same endpoint
+		// This can happen if they set OTEL_EXPORTER_OTLP_ENDPOINT to AIQA_SERVER_URL
+		otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+		shouldSkip := false
+
+		if otelEndpoint != "" {
+			// Normalize the OTEL endpoint for comparison
+			otelEndpointNormalized := strings.TrimRight(otelEndpoint, "/")
+			otelParsedURL, err := url.Parse(otelEndpointNormalized)
+			if err == nil && otelParsedURL.Scheme != "" {
+				otelEndpointNormalized = fmt.Sprintf("%s://%s", otelParsedURL.Scheme, otelParsedURL.Host)
+				serverURLNormalized := strings.TrimRight(serverURL, "/")
+				if otelEndpointNormalized == serverURLNormalized {
+					// User's OTEL init is already pointing to the same endpoint
+					fmt.Printf("AIQA: (skip add) User's OTEL init is already pointing to the same endpoint: %s\n", otelEndpointNormalized)
+					shouldSkip = true
+				}
+			}
+		}
+
+		if shouldSkip {
+			// User's OTEL init already configured correctly - skip adding our exporter
+			// Mark as attached so we don't try again
+			attachedProvidersMutex.Lock()
+			attachedProviders[sdkProvider] = true
+			attachedProvidersMutex.Unlock()
+			tracer = otel.Tracer(AIQATracerName)
+			return nil
+		}
+
+		// Add our span processor to the existing provider
+		// Our exporter ensures the API key header is set correctly for AIQA authentication
+		fmt.Printf("AIQA: Adding span processor to existing provider: %s\n", serverURL)
 		bsp := sdktrace.NewBatchSpanProcessor(exporter)
 		sdkProvider.RegisterSpanProcessor(bsp)
+
+		// Mark as attached for idempotency
+		attachedProvidersMutex.Lock()
+		attachedProviders[sdkProvider] = true
+		attachedProvidersMutex.Unlock()
+
 		tracer = otel.Tracer(AIQATracerName)
 		return nil
 	}
@@ -298,7 +343,7 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 
 	otel.SetTracerProvider(tracerProvider)
 	tracer = otel.Tracer(AIQATracerName)
-
+	fmt.Printf("AIQA: New tracer provider created: %s\n", serverURL)
 	return nil
 }
 

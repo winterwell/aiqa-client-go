@@ -2,6 +2,7 @@ package aiqa
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,13 +13,45 @@ import (
 	"time"
 )
 
+// debugResponseBody logs response metadata and a safe preview of body when AIQA_DEBUG=1.
+// Non-printable bytes are shown as \xNN so escape sequences (e.g. \\x1b) are visible.
+func debugResponseBody(resp *http.Response, body []byte, decodeErr error) {
+	if os.Getenv("AIQA_DEBUG") == "" {
+		return
+	}
+	url := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		url = resp.Request.URL.String()
+	}
+	const previewLen = 600
+	preview := body
+	if len(preview) > previewLen {
+		preview = preview[:previewLen]
+	}
+	var sb strings.Builder
+	for _, b := range preview {
+		if b >= 32 && b < 127 && b != '\\' {
+			sb.WriteByte(b)
+		} else {
+			sb.WriteString(fmt.Sprintf("\\x%02x", b))
+		}
+	}
+	if len(body) > previewLen {
+		sb.WriteString("...")
+	}
+	ct := resp.Header.Get("Content-Type")
+	fmt.Fprintf(os.Stderr, "AIQA: DEBUG parseJSONResponse failed url=%q status=%d content_type=%q body_len=%d decode_err=%v\n",
+		url, resp.StatusCode, ct, len(body), decodeErr)
+	fmt.Fprintf(os.Stderr, "AIQA: DEBUG response body preview: %s\n", sb.String())
+}
+
 // BuildHeaders builds HTTP headers for AIQA API requests
 // Note: net/http automatically handles gzip/deflate decompression when Accept-Encoding header is set
 // Checks AIQA_API_KEY first, then falls back to OTEL_EXPORTER_OTLP_HEADERS if not set
 func BuildHeaders(apiKey string) map[string]string {
 	headers := map[string]string{
 		"Content-Type":    "application/json",
-		"Accept-Encoding": "gzip, deflate, br", // Request compression (net/http handles decompression automatically)
+		"Accept-Encoding": "gzip, deflate", // br omitted: stdlib does not decompress Brotli; server may still send gzip
 	}
 	
 	// Check parameter first
@@ -143,16 +176,35 @@ func makeRequest(ctx context.Context, method, url string, body interface{}, apiK
 	return resp, nil
 }
 
-// parseJSONResponse parses a JSON response body into the provided struct
+// parseJSONResponse parses a JSON response body into the provided struct.
+// When decode fails, set AIQA_DEBUG=1 to log response headers and body preview (non-printables as \xNN).
 func parseJSONResponse(resp *http.Response, result interface{}) error {
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("request failed: %d %s - %s", resp.StatusCode, resp.Status, string(body))
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+	// Decompress if server sent gzip but did not set Content-Encoding (so net/http didn't decompress)
+	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		gr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer gr.Close()
+		body, err = io.ReadAll(gr)
+		if err != nil {
+			return fmt.Errorf("failed to decompress gzip response: %w", err)
+		}
+	}
+
+	if err := json.Unmarshal(body, result); err != nil {
+		debugResponseBody(resp, body, err)
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
