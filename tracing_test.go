@@ -105,19 +105,19 @@ func TestInitTracing(t *testing.T) {
 		wantErr      bool
 	}{
 		{
-			name:         "with provided args",
-			serverURL:    "http://127.0.0.1:1", // Use invalid port to fail fast in tests
-			apiKey:       "test-key",
-			samplingRate: 0.5,
-			wantEnabled:  true,
-			wantErr:      false,
-		},
-		{
 			name:         "missing env vars",
 			serverURL:    "",
 			apiKey:       "",
 			samplingRate: 1.0,
 			wantEnabled:  false,
+			wantErr:      false,
+		},
+		{
+			name:         "with provided args",
+			serverURL:    "http://127.0.0.1:1", // Use invalid port to fail fast in tests
+			apiKey:       "test-key",
+			samplingRate: 0.5,
+			wantEnabled:  true,
 			wantErr:      false,
 		},
 	}

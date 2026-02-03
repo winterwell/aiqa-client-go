@@ -32,7 +32,7 @@ go mod download
 
 1. Set environment variables (or pass them to `InitTracing`):
 ```bash
-export AIQA_SERVER_URL=http://localhost:4001
+export AIQA_SERVER_URL=http://localhost:4318
 export AIQA_API_KEY=your-api-key
 export AIQA_COMPONENT_TAG=mynamespace.mysystem  # Optional: component tag for all spans
 ```
@@ -56,12 +56,7 @@ import (
 )
 
 func main() {
-    // Initialize tracing (can also pass serverURL and apiKey as parameters)
-    // Sampling rate can be passed as third parameter (0.0 to 1.0)
-    err := aiqa.InitTracing("", "")
-    if err != nil {
-        panic(err)
-    }
+    // Initialize tracing - usually done automatically
 
     // Wrap a function with tracing
     multiply := func(x, y int) int {

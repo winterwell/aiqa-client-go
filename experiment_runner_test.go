@@ -26,7 +26,7 @@ func TestNewExperimentRunner(t *testing.T) {
 	// Test with provided options
 	options := ExperimentRunnerOptions{
 		DatasetId:      "test-dataset",
-		ExperimentId:    "test-experiment",
+		ExperimentId:   "test-experiment",
 		ServerUrl:      "http://localhost:3000",
 		ApiKey:         "test-key",
 		OrganisationId: "test-org",
@@ -154,11 +154,7 @@ func TestExperimentRunner_RunExample(t *testing.T) {
 		return "test-output", nil
 	}
 
-	scorer := func(output interface{}, example Example, parameters map[string]interface{}) (map[string]float64, error) {
-		return map[string]float64{"score": 1.0}, nil
-	}
-
-	_, err := runner.RunExample(ctx, example, engine, scorer)
+	_, err := runner.RunExample(ctx, example, engine)
 	// Should fail without a real server, but we're testing the function exists
 	if err == nil {
 		t.Log("RunExample succeeded (unexpected - may have real server)")
@@ -183,7 +179,7 @@ func TestExampleStruct(t *testing.T) {
 	example := Example{
 		Id:      "test-id",
 		TraceId: "test-trace",
-		Dataset:  "test-dataset",
+		Dataset: "test-dataset",
 		Input:   "test-input",
 		Outputs: map[string]interface{}{
 			"output1": "value1",
@@ -219,11 +215,11 @@ func TestMetricStruct(t *testing.T) {
 
 func TestDatasetStruct(t *testing.T) {
 	dataset := Dataset{
-		Id:          "test-dataset",
+		Id:           "test-dataset",
 		Organisation: "test-org",
-		Name:        "Test Dataset",
-		Description: "Test description",
-		Tags:        []string{"tag1", "tag2"},
+		Name:         "Test Dataset",
+		Description:  "Test description",
+		Tags:         []string{"tag1", "tag2"},
 		Metrics: []Metric{
 			{Name: "metric1", Type: "javascript"},
 		},
@@ -295,4 +291,3 @@ func TestMetricStatsStruct(t *testing.T) {
 		t.Errorf("Expected Count to be 10, got %d", stats.Count)
 	}
 }
-

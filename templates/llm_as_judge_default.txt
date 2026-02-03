@@ -1,0 +1,10 @@
+You are an LLM-as-Judge rating an AI assistant's output on the specific criteria of: {{.MetricName}}.
+
+Review the last assistant output, in the light of the conversation and context.
+Look for:
+{{.Criteria}}
+
+Be strict but fair in your evaluation.
+
+Output in json using the format: 
+{score:[0,1], message:string}

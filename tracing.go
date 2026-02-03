@@ -29,14 +29,14 @@ var (
 	tracerProvider        *sdktrace.TracerProvider
 	tracer                trace.Tracer
 	exporter              sdktrace.SpanExporter
-	samplingRate          float64    = 1.0   // Default: sample all traces
-	componentTag          string     = ""    // Component tag to add to all spans
-	tracingEnabled        bool       = true  // Whether tracing is enabled (set to false if env vars missing)
-	initialized           bool       = false // Whether tracing has been initialized (lazy initialization)
-	initMutex             sync.Mutex         // Mutex for thread-safe lazy initialization
-	defaultIgnorePatterns []string   = []string{"_*"} // Default ignore patterns (filters properties starting with '_')
-	ignoreRecursive       bool       = true  // Whether to apply ignore patterns recursively
-	clientMutex           sync.RWMutex       // Mutex for thread-safe access to client state
+	samplingRate          float64      = 1.0            // Default: sample all traces
+	componentTag          string       = ""             // Component tag to add to all spans
+	tracingEnabled        bool         = true           // Whether tracing is enabled (set to false if env vars missing)
+	initialized           bool         = false          // Whether tracing has been initialized (lazy initialization)
+	initMutex             sync.Mutex                    // Mutex for thread-safe lazy initialization
+	defaultIgnorePatterns []string     = []string{"_*"} // Default ignore patterns (filters properties starting with '_')
+	ignoreRecursive       bool         = true           // Whether to apply ignore patterns recursively
+	clientMutex           sync.RWMutex                  // Mutex for thread-safe access to client state
 )
 
 func init() {
@@ -125,15 +125,19 @@ func InitTracing(serverURL, apiKey string, samplingRateArg ...float64) error {
 	return ensureTracingInitialized(serverURL, apiKey, rate)
 }
 
-// ensureTracingInitialized ensures tracing is initialized (lazy initialization)
-// Thread-safe: uses mutex to ensure initialization only happens once
+// ensureTracingInitialized ensures tracing is initialized (lazy initialization).
+// Thread-safe. When already initialized, returns early unless explicit serverURL and apiKey
+// are provided (allows re-enabling after a previous graceful disable).
 func ensureTracingInitialized(serverURL, apiKey string, samplingRateArg *float64) error {
 	initMutex.Lock()
 	defer initMutex.Unlock()
 
-	// Already initialized, return early
 	if initialized {
-		return nil
+		// Allow re-init when caller provides explicit enabling args (e.g. test: disable then enable)
+		if serverURL == "" || apiKey == "" {
+			return nil
+		}
+		initialized = false
 	}
 
 	// Mark as initialized before actual initialization to prevent retry loops on error
@@ -257,12 +261,11 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 	}
 	exporter = otlpExporter
 
-	// Check if a TracerProvider is already set and not shut down
+	// Check if a TracerProvider is already set (e.g. by the application).
 	existingProvider := otel.GetTracerProvider()
 
-	// Try to cast to SDK TracerProvider to see if it's a real provider
-	// Only reuse if it's our own provider (not shut down)
-	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok && tracerProvider == sdkProvider && tracerProvider != nil {
+	// Reuse any existing SDK TracerProvider so WithTracing spans use the same exporter(s).
+	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok && sdkProvider != nil {
 		// Real provider already exists, add our span processor to it
 		bsp := sdktrace.NewBatchSpanProcessor(exporter)
 		sdkProvider.RegisterSpanProcessor(bsp)
@@ -310,17 +313,22 @@ func FlushSpans(ctx context.Context) error {
 // ShutdownTracing shuts down the tracer provider and exporter.
 // Note: If InitTracing detected and used an existing TracerProvider, calling this
 // will shutdown the entire provider, which may affect other tracing systems. Use with caution.
+// Resets initialized so a subsequent InitTracing/GetAIQAClient can re-initialize.
 func ShutdownTracing(ctx context.Context) error {
 	if tracerProvider != nil {
 		if err := tracerProvider.Shutdown(ctx); err != nil {
 			return err
 		}
 		tracerProvider = nil
+		// Reset global so next InitTracing doesn't reuse a shut-down provider (which would yield non-recording spans)
+		otel.SetTracerProvider(sdktrace.NewTracerProvider())
 	}
-	// Exporter is shut down as part of tracerProvider.Shutdown()
 	exporter = nil
 	tracer = nil
 	tracingEnabled = false
+	initMutex.Lock()
+	initialized = false
+	initMutex.Unlock()
 	return nil
 }
 
@@ -1118,12 +1126,17 @@ func CreateSpanFromTraceId(ctx context.Context, traceId string, parentSpanId str
 	if spanName == "" {
 		spanName = "continued_span"
 	}
+	// Use global tracer when ours is nil (tracing disabled) so we get a noop span and avoid nil dereference
+	t := tracer
+	if t == nil {
+		t = otel.Tracer(AIQATracerName)
+	}
 
 	// Parse trace ID
 	traceID, err := trace.TraceIDFromHex(traceId)
 	if err != nil {
 		// Fallback: create a new span
-		ctx, span := tracer.Start(ctx, spanName)
+		ctx, span := t.Start(ctx, spanName)
 		setComponentTagIfSet(span)
 		return ctx, span
 	}
@@ -1150,7 +1163,7 @@ func CreateSpanFromTraceId(ctx context.Context, traceId string, parentSpanId str
 	ctx = trace.ContextWithRemoteSpanContext(ctx, spanContext)
 
 	// Start a new span in this context (it will be a child of the parent span)
-	ctx, span := tracer.Start(ctx, spanName)
+	ctx, span := t.Start(ctx, spanName)
 	setComponentTagIfSet(span)
 	return ctx, span
 }
@@ -1215,39 +1228,28 @@ func GetSpan(ctx context.Context, spanId string, organisationId string) (map[str
 		return nil, fmt.Errorf("Organisation ID is required. Provide it as parameter or set AIQA_ORGANISATION_ID environment variable")
 	}
 
-	// Try both spanId and clientSpanId queries
-	queryFields := []string{"spanId", "clientSpanId"}
-	for _, queryField := range queryFields {
-		url := fmt.Sprintf("%s/span?q=%s:%s&organisation=%s&limit=1", serverURL, queryField, spanId, orgID)
-
-		resp, err := makeRequest(ctx, "GET", url, nil, apiKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get span: %w", err)
-		}
-
-		if resp.StatusCode == 200 {
-			var result struct {
-				Hits  []map[string]interface{} `json:"hits"`
-				Total int                      `json:"total"`
-			}
-			if err := parseJSONResponse(resp, &result); err == nil {
-				if len(result.Hits) > 0 {
-					return result.Hits[0], nil
-				}
-			}
-			// parseJSONResponse already closes the body
-		} else if resp.StatusCode == 400 {
-			// Try next query field
-			resp.Body.Close()
-			continue
-		} else {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to get span: %d %s - %s", resp.StatusCode, resp.Status, string(body))
-		}
+	url := fmt.Sprintf("%s/span/%s?limit=1", serverURL, spanId)
+	resp, err := makeRequest(ctx, "GET", url, nil, apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get span: %w", err)
 	}
+	defer resp.Body.Close()
 
-	return nil, nil
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get span: %d %s - %s", resp.StatusCode, resp.Status, string(body))
+	}
+	var result struct {
+		Hits  []map[string]interface{} `json:"hits"`
+		Total int                      `json:"total"`
+	}
+	if err := parseJSONResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Hits) == 0 {
+		return nil, nil
+	}
+	return result.Hits[0], nil
 }
 
 // SubmitFeedback submits feedback for a trace by creating a new span with the same trace ID.
@@ -1283,14 +1285,13 @@ func SubmitFeedback(ctx context.Context, traceId string, feedback FeedbackOption
 
 	// Set feedback attributes
 	if feedback.ThumbsUp != nil {
-		span.SetAttributes(attribute.Bool("feedback.thumbs_up", *feedback.ThumbsUp))
 		if *feedback.ThumbsUp {
-			span.SetAttributes(attribute.String("feedback.type", "positive"))
+			span.SetAttributes(attribute.String("feedback", "positive"))
 		} else {
-			span.SetAttributes(attribute.String("feedback.type", "negative"))
+			span.SetAttributes(attribute.String("feedback", "negative"))
 		}
 	} else {
-		span.SetAttributes(attribute.String("feedback.type", "neutral"))
+		span.SetAttributes(attribute.String("feedback", "neutral"))
 	}
 
 	if feedback.Comment != "" {

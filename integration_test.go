@@ -206,17 +206,17 @@ func TestIntegration_BasicSpanGenerationAndRetrieval(t *testing.T) {
 	}
 
 	// Check required fields
-	if _, ok := span["traceId"]; !ok {
-		t.Error("Span missing traceId")
+	if _, ok := span["trace"]; !ok {
+		t.Error("Span missing trace")
 	}
-	if _, ok := span["spanId"]; !ok {
-		t.Error("Span missing spanId")
+	if _, ok := span["id"]; !ok {
+		t.Error("Span missing id")
 	}
-	if _, ok := span["startTime"]; !ok {
-		t.Error("Span missing startTime")
+	if _, ok := span["start"]; !ok {
+		t.Error("Span missing start")
 	}
-	if _, ok := span["endTime"]; !ok {
-		t.Error("Span missing endTime")
+	if _, ok := span["end"]; !ok {
+		t.Error("Span missing end")
 	}
 }
 
