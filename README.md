@@ -226,7 +226,7 @@ ctx := context.Background()
 inputTokens := 100
 outputTokens := 50
 totalTokens := 150
-aiqa.SetTokenUsage(ctx, &inputTokens, &outputTokens, &totalTokens)
+aiqa.SetTokenUsage(ctx, &inputTokens, &outputTokens, &totalTokens, nil)
 ```
 
 ### Manually Setting Provider and Model
@@ -481,4 +481,3 @@ When developing the client and testing it in another Go project, use the `replac
 ### Contributing
 
 Contributions are welcome! Please open an issue or pull request on [GitHub](https://github.com/winterwell/aiqa-client-go).
-

@@ -128,11 +128,15 @@ func TestExperimentRunner_ScoreAndStore(t *testing.T) {
 
 	ctx := context.Background()
 	example := Example{
-		Id:      "test-example",
-		TraceId: "test-trace-id",
+		Id:    "test-example",
+		Trace: "test-trace-id",
 	}
 
-	_, err := runner.ScoreAndStore(ctx, example, "test-result", map[string]float64{"score": 0.5})
+	result := &Result{
+		Example: example.Id,
+		Trace:   example.Trace,
+	}
+	_, err := runner.ScoreAndStore(ctx, result, "test-result", map[string]float64{"score": 0.5})
 	// Should fail without a real server, but we're testing the function exists
 	if err == nil {
 		t.Log("ScoreAndStore succeeded (unexpected - may have real server)")
@@ -151,7 +155,7 @@ func TestExperimentRunner_RunExample(t *testing.T) {
 		Input: "test-input",
 	}
 
-	engine := func(input interface{}, parameters map[string]interface{}) (interface{}, error) {
+	engine := func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error) {
 		return "test-output", nil
 	}
 
@@ -174,16 +178,16 @@ func TestExperimentRunner_RunExample_ErrStopEarly(t *testing.T) {
 		Input: "test-input",
 	}
 
-	engine := func(input interface{}, parameters map[string]interface{}) (interface{}, error) {
-		return nil, ErrStopEarly
+	engine := func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error) {
+		return nil, ErrStopExperiment
 	}
 
 	_, err := runner.RunExample(ctx, example, engine)
-	// Should return ErrStopEarly (may be wrapped if server call fails first)
+	// Should return ErrStopExperiment (may be wrapped if server call fails first)
 	if err == nil {
-		t.Error("RunExample should return error when engine returns ErrStopEarly")
+		t.Error("RunExample should return error when engine returns ErrStopExperiment")
 	}
-	if !errors.Is(err, ErrStopEarly) {
+	if !errors.Is(err, ErrStopExperiment) {
 		t.Logf("RunExample returned error (may be wrapped by server call): %v", err)
 	}
 }
@@ -205,7 +209,7 @@ func TestExperimentRunner_GetSummaryResults(t *testing.T) {
 func TestExampleStruct(t *testing.T) {
 	example := Example{
 		Id:      "test-id",
-		TraceId: "test-trace",
+		Trace:   "test-trace",
 		Dataset: "test-dataset",
 		Input:   "test-input",
 		Outputs: map[string]interface{}{
@@ -216,8 +220,8 @@ func TestExampleStruct(t *testing.T) {
 	if example.Id != "test-id" {
 		t.Errorf("Expected Id to be 'test-id', got '%s'", example.Id)
 	}
-	if example.TraceId != "test-trace" {
-		t.Errorf("Expected TraceId to be 'test-trace', got '%s'", example.TraceId)
+	if example.Trace != "test-trace" {
+		t.Errorf("Expected TraceId to be 'test-trace', got '%s'", example.Trace)
 	}
 }
 

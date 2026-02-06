@@ -3,9 +3,7 @@ package aiqa
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
-	"reflect"
 	"testing"
 	"time"
 
@@ -228,145 +226,6 @@ func TestTraceIDSampler(t *testing.T) {
 	if desc == "" {
 		t.Error("Description should not be empty")
 	}
-}
-
-func TestWithTracing_SyncFunction(t *testing.T) {
-	// Setup tracing
-	originalServerURL := os.Getenv("AIQA_SERVER_URL")
-	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	defer func() {
-		if originalServerURL != "" {
-			os.Setenv("AIQA_SERVER_URL", originalServerURL)
-		} else {
-			os.Unsetenv("AIQA_SERVER_URL")
-		}
-		if originalAPIKey != "" {
-			os.Setenv("AIQA_API_KEY", originalAPIKey)
-		} else {
-			os.Unsetenv("AIQA_API_KEY")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ShutdownTracing(ctx)
-	}()
-
-	os.Unsetenv("AIQA_SERVER_URL")
-	os.Unsetenv("AIQA_API_KEY")
-
-	// Use invalid port to fail fast in tests (connection refused, not timeout)
-	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0) // Disable sampling for testing
-	if err != nil {
-		t.Fatalf("Failed to init tracing: %v", err)
-	}
-
-	// Test simple sync function
-	multiply := func(x, y int) int {
-		return x * y
-	}
-	tracedMultiply := WithTracing(multiply).(func(int, int) int)
-	result := tracedMultiply(5, 3)
-	if result != 15 {
-		t.Errorf("Expected 15, got %d", result)
-	}
-}
-
-func TestWithTracing_AsyncFunction(t *testing.T) {
-	// Setup tracing
-	originalServerURL := os.Getenv("AIQA_SERVER_URL")
-	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	defer func() {
-		if originalServerURL != "" {
-			os.Setenv("AIQA_SERVER_URL", originalServerURL)
-		} else {
-			os.Unsetenv("AIQA_SERVER_URL")
-		}
-		if originalAPIKey != "" {
-			os.Setenv("AIQA_API_KEY", originalAPIKey)
-		} else {
-			os.Unsetenv("AIQA_API_KEY")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ShutdownTracing(ctx)
-	}()
-
-	os.Unsetenv("AIQA_SERVER_URL")
-	os.Unsetenv("AIQA_API_KEY")
-
-	// Use invalid port to fail fast in tests (connection refused, not timeout)
-	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
-	if err != nil {
-		t.Fatalf("Failed to init tracing: %v", err)
-	}
-
-	// Test async function (returns error)
-	divide := func(x, y float64) (float64, error) {
-		if y == 0 {
-			return 0, fmt.Errorf("division by zero")
-		}
-		return x / y, nil
-	}
-	tracedDivide := WithTracing(divide).(func(float64, float64) (float64, error))
-	result, err := tracedDivide(10, 2)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if result != 5.0 {
-		t.Errorf("Expected 5.0, got %f", result)
-	}
-}
-
-func TestWithTracing_WithContext(t *testing.T) {
-	// Setup tracing
-	originalServerURL := os.Getenv("AIQA_SERVER_URL")
-	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	defer func() {
-		if originalServerURL != "" {
-			os.Setenv("AIQA_SERVER_URL", originalServerURL)
-		} else {
-			os.Unsetenv("AIQA_SERVER_URL")
-		}
-		if originalAPIKey != "" {
-			os.Setenv("AIQA_API_KEY", originalAPIKey)
-		} else {
-			os.Unsetenv("AIQA_API_KEY")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ShutdownTracing(ctx)
-	}()
-
-	os.Unsetenv("AIQA_SERVER_URL")
-	os.Unsetenv("AIQA_API_KEY")
-
-	// Use invalid port to fail fast in tests (connection refused, not timeout)
-	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
-	if err != nil {
-		t.Fatalf("Failed to init tracing: %v", err)
-	}
-
-	// Test function with context
-	processData := func(ctx context.Context, data string) (string, error) {
-		return fmt.Sprintf("Processed: %s", data), nil
-	}
-	tracedProcess := WithTracing(processData).(func(context.Context, string) (string, error))
-	result, err := tracedProcess(context.Background(), "test")
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if result != "Processed: test" {
-		t.Errorf("Expected 'Processed: test', got '%s'", result)
-	}
-}
-
-func TestWithTracing_InvalidInput(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("WithTracing should panic when given non-function")
-		}
-	}()
-
-	WithTracing("not a function")
 }
 
 func TestIsJWTToken(t *testing.T) {
@@ -744,92 +603,6 @@ func TestCreateSpanFromTraceId(t *testing.T) {
 	}
 }
 
-func TestExtractAndSetTokenUsage(t *testing.T) {
-	// Setup tracing
-	originalServerURL := os.Getenv("AIQA_SERVER_URL")
-	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	defer func() {
-		if originalServerURL != "" {
-			os.Setenv("AIQA_SERVER_URL", originalServerURL)
-		} else {
-			os.Unsetenv("AIQA_SERVER_URL")
-		}
-		if originalAPIKey != "" {
-			os.Setenv("AIQA_API_KEY", originalAPIKey)
-		} else {
-			os.Unsetenv("AIQA_API_KEY")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ShutdownTracing(ctx)
-	}()
-
-	os.Unsetenv("AIQA_SERVER_URL")
-	os.Unsetenv("AIQA_API_KEY")
-
-	// Use invalid port to fail fast in tests (connection refused, not timeout)
-	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
-	if err != nil {
-		t.Fatalf("Failed to init tracing: %v", err)
-	}
-
-	_, span := tracer.Start(context.Background(), "test-span")
-	defer span.End()
-
-	// Test with OpenAI format
-	result := map[string]interface{}{
-		"usage": map[string]interface{}{
-			"prompt_tokens":     10,
-			"completion_tokens": 20,
-			"total_tokens":      30,
-		},
-	}
-
-	extractAndSetTokenUsage(span, result)
-	// Function should not panic and should set attributes
-}
-
-func TestExtractAndSetProviderAndModel(t *testing.T) {
-	// Setup tracing
-	originalServerURL := os.Getenv("AIQA_SERVER_URL")
-	originalAPIKey := os.Getenv("AIQA_API_KEY")
-	defer func() {
-		if originalServerURL != "" {
-			os.Setenv("AIQA_SERVER_URL", originalServerURL)
-		} else {
-			os.Unsetenv("AIQA_SERVER_URL")
-		}
-		if originalAPIKey != "" {
-			os.Setenv("AIQA_API_KEY", originalAPIKey)
-		} else {
-			os.Unsetenv("AIQA_API_KEY")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ShutdownTracing(ctx)
-	}()
-
-	os.Unsetenv("AIQA_SERVER_URL")
-	os.Unsetenv("AIQA_API_KEY")
-
-	// Use invalid port to fail fast in tests (connection refused, not timeout)
-	err := InitTracing("http://127.0.0.1:1", "test-key", 0.0)
-	if err != nil {
-		t.Fatalf("Failed to init tracing: %v", err)
-	}
-
-	_, span := tracer.Start(context.Background(), "test-span")
-	defer span.End()
-
-	// Test with model in result
-	result := map[string]interface{}{
-		"model": "gpt-4",
-	}
-
-	extractAndSetProviderAndModel(span, result)
-	// Function should not panic and should set attributes
-}
-
 func TestSetTokenUsage(t *testing.T) {
 	// Setup tracing
 	originalServerURL := os.Getenv("AIQA_SERVER_URL")
@@ -866,14 +639,14 @@ func TestSetTokenUsage(t *testing.T) {
 	outputTokens := 20
 	totalTokens := 30
 
-	success := SetTokenUsage(ctx, &inputTokens, &outputTokens, &totalTokens)
+	success := SetTokenUsage(ctx, &inputTokens, &outputTokens, &totalTokens, nil)
 	if !success {
 		t.Error("SetTokenUsage should return true when span is recording")
 	}
 
 	// Test with no active span
 	ctxNoSpan := context.Background()
-	success = SetTokenUsage(ctxNoSpan, &inputTokens, &outputTokens, &totalTokens)
+	success = SetTokenUsage(ctxNoSpan, &inputTokens, &outputTokens, &totalTokens, nil)
 	if success {
 		t.Error("SetTokenUsage should return false when no active span")
 	}
@@ -969,61 +742,5 @@ func TestSetConversationId(t *testing.T) {
 	success = SetConversationId(ctxNoSpan, "conv-123")
 	if success {
 		t.Error("SetConversationId should return false when no active span")
-	}
-}
-
-func TestPrepareInput(t *testing.T) {
-	opt := TracingOptions{}
-
-	// Test with no args
-	result := prepareInput([]reflect.Value{}, opt)
-	if result != nil {
-		t.Error("prepareInput should return nil for empty args")
-	}
-
-	// Test with single arg
-	arg1 := reflect.ValueOf("test")
-	result = prepareInput([]reflect.Value{arg1}, opt)
-	if result != "test" {
-		t.Errorf("Expected 'test', got %v", result)
-	}
-
-	// Test with multiple args
-	arg2 := reflect.ValueOf(42)
-	result = prepareInput([]reflect.Value{arg1, arg2}, opt)
-	resultMap := result.(map[string]interface{})
-	if resultMap["arg0"] != "test" {
-		t.Errorf("Expected arg0 to be 'test', got %v", resultMap["arg0"])
-	}
-	if resultMap["arg1"] != 42 {
-		t.Errorf("Expected arg1 to be 42, got %v", resultMap["arg1"])
-	}
-}
-
-func TestPrepareOutput(t *testing.T) {
-	opt := TracingOptions{}
-
-	// Test with no results
-	result := prepareOutput([]reflect.Value{}, opt)
-	if result != nil {
-		t.Error("prepareOutput should return nil for empty results")
-	}
-
-	// Test with single result
-	res1 := reflect.ValueOf("result")
-	result = prepareOutput([]reflect.Value{res1}, opt)
-	if result != "result" {
-		t.Errorf("Expected 'result', got %v", result)
-	}
-
-	// Test with multiple results
-	res2 := reflect.ValueOf(100)
-	result = prepareOutput([]reflect.Value{res1, res2}, opt)
-	resultMap := result.(map[string]interface{})
-	if resultMap["result0"] != "result" {
-		t.Errorf("Expected result0 to be 'result', got %v", resultMap["result0"])
-	}
-	if resultMap["result1"] != 100 {
-		t.Errorf("Expected result1 to be 100, got %v", resultMap["result1"])
 	}
 }

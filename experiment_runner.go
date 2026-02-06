@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,7 +29,10 @@ type ExperimentRunnerOptions struct {
 	ServerUrl      string
 	ApiKey         string
 	OrganisationId string
-	// LlmCallFn optional: called for LLM-as-judge metrics when type is "llm". If nil, uses OPENAI_API_KEY/ANTHROPIC_API_KEY or model from server.
+	// LlmCallFn optional: called for LLM-as-judge metrics when type is "llm".
+	// If nil, uses a default function that uses OPENAI_API_KEY/ANTHROPIC_API_KEY or model from server.
+	// If you want to track your token use on this too - either use the default (which has token tracking,
+	// or provide your own with token tracking.
 	LlmCallFn LLMCallFn
 	// ScorerForMetricId optional: map metric id -> scorer; used in RunExample when scoring metrics. If nil, no per-metric scoring.
 	ScorerForMetricId map[string]ScorerForMetricFn
@@ -36,9 +40,11 @@ type ExperimentRunnerOptions struct {
 
 // Example represents an example from a dataset
 type Example struct {
-	Id           string                 `json:"id,omitempty"`
-	Name         string                 `json:"name,omitempty"`
-	TraceId      string                 `json:"trace_id,omitempty"`
+	Id   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	// The source trace, if created from spans. Do not edit this - it is set by the server.
+	// For the trace relating to running an example, see Result.Trace.
+	Trace        string                 `json:"trace,omitempty"`
 	Dataset      string                 `json:"dataset"`
 	Organisation string                 `json:"organisation"`
 	Spans        []interface{}          `json:"spans,omitempty"`
@@ -47,6 +53,7 @@ type Example struct {
 	Created      time.Time              `json:"created"`
 	Updated      time.Time              `json:"updated"`
 	Metrics      []Metric               `json:"metrics,omitempty"`
+	Tags         []string               `json:"tags,omitempty"`
 }
 
 // Metric represents a metric for scoring
@@ -67,16 +74,14 @@ type Metric struct {
 
 // Dataset represents a dataset
 type Dataset struct {
-	Id           string      `json:"id"`
-	Organisation string      `json:"organisation"`
-	Name         string      `json:"name"`
-	Description  string      `json:"description,omitempty"`
-	Tags         []string    `json:"tags,omitempty"`
-	InputSchema  interface{} `json:"input_schema,omitempty"`
-	OutputSchema interface{} `json:"output_schema,omitempty"`
-	Metrics      []Metric    `json:"metrics,omitempty"`
-	Created      time.Time   `json:"created"`
-	Updated      time.Time   `json:"updated"`
+	Id           string    `json:"id"`
+	Organisation string    `json:"organisation"`
+	Name         string    `json:"name"`
+	Description  string    `json:"description,omitempty"`
+	Tags         []string  `json:"tags,omitempty"`
+	Metrics      []Metric  `json:"metrics,omitempty"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
 }
 
 // Experiment represents an experiment
@@ -92,17 +97,20 @@ type Experiment struct {
 	Results      []Result               `json:"results,omitempty"`
 }
 
-// Result represents a result for an example. See Experiment.ts Result interface.
+// Result represents the result for an example. See Experiment.ts Result interface.
 type Result struct {
-	ExampleId string             `json:"exampleId"`
-	TraceId   string             `json:"trace_id,omitempty"`
-	Scores    map[string]float64 `json:"scores"`
-	Messages  map[string]string  `json:"messages,omitempty"`
-	Errors    map[string]string  `json:"errors,omitempty"`
+	Example     string             `json:"example"`
+	Trace       string             `json:"trace,omitempty"`
+	RateLimited bool               `json:"rateLimited,omitempty"`
+	Scores      map[string]float64 `json:"scores"`
+	Messages    map[string]string  `json:"messages,omitempty"`
+	Errors      map[string]string  `json:"errors,omitempty"`
 }
 
-// ScoreResult represents the result of scoring
-type ScoreResult map[string]interface{}
+const (
+	AIQA_TRACE_ID   = "aiqa.experiment"
+	AIQA_EXAMPLE_ID = "aiqa.example"
+)
 
 // MetricStats represents statistics for a metric
 type MetricStats struct {
@@ -126,12 +134,7 @@ type ExperimentRunner struct {
 	datasetCache      *Dataset
 	llmCallFn         LLMCallFn
 	scorerForMetricId map[string]ScorerForMetricFn
-	scores            []struct {
-		example Example
-		result  interface{}
-		scores  ScoreResult
-	}
-	summaryResults map[string]MetricStats
+	summaryResults    map[string]MetricStats
 }
 
 // NewExperimentRunner creates a new ExperimentRunner
@@ -360,7 +363,7 @@ func (er *ExperimentRunner) CreateExperiment(ctx context.Context, experimentSetu
 }
 
 // ScoreAndStore asks the server to score an example result. Stores the score for later summary calculation.
-func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, example Example, result interface{}, scores map[string]float64) (ScoreResult, error) {
+func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, result *Result, output interface{}, scores map[string]float64) (*Result, error) {
 	// Do we have an experiment ID? If not, we need to create the experiment first
 	if er.experimentId == "" {
 		if _, err := er.CreateExperiment(ctx, nil); err != nil {
@@ -368,33 +371,49 @@ func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, example Example, 
 		}
 	}
 
-	fmt.Printf("AIQA: Scoring and storing example: %s\n", example.Id)
-	fmt.Printf("AIQA: Scores: %v\n", scores)
-	requestBody := map[string]interface{}{
-		"output":   result,
-		"trace_id": example.TraceId,
-		"scores":   scores,
+	if result == nil || result.Example == "" {
+		return nil, fmt.Errorf("result with example id is required")
 	}
 
-	url := fmt.Sprintf("%s/experiment/%s/example/%s/scoreAndStore", er.serverUrl, er.experimentId, example.Id)
+	if scores == nil {
+		scores = map[string]float64{}
+	}
+
+	fmt.Printf("AIQA: Scoring and storing example: %s\n", result.Example)
+	fmt.Printf("AIQA: Scores: %v\n", scores)
+	requestBody := map[string]interface{}{
+		"output": output,
+		"trace":  result.Trace,
+		"scores": scores,
+	}
+	fmt.Printf("AIQA: scoreAndStore %s request body: %v\n", result.Example, requestBody)
+	url := fmt.Sprintf("%s/experiment/%s/example/%s/scoreAndStore", er.serverUrl, er.experimentId, result.Example)
 	resp, err := makeRequest(ctx, "POST", url, requestBody, er.apiKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to score and store: %w", err)
 	}
 
-	var scoreResult ScoreResult
-	if err := parseJSONResponse(resp, &scoreResult); err != nil {
+	var remoteResult Result
+	if err := parseJSONResponse(resp, &remoteResult); err != nil {
 		return nil, fmt.Errorf("failed to score and store: %w", err)
 	}
 
-	fmt.Printf("AIQA: scoreAndStore response: %v\n", scoreResult)
-	return scoreResult, nil
+	if remoteResult.Trace == "" && result.Trace != "" {
+		remoteResult.Trace = result.Trace
+	}
+	fmt.Printf("AIQA: scoreAndStore response: %v\n", remoteResult)
+	return &remoteResult, nil
 }
 
 // Run runs an engine function on all examples and scores the results
-// engine: function that takes input and parameters and returns output
+// engine: function that takes context, input and parameters and returns output
 // Checks if results already exist for an example before calling RunExample, allowing experiments to be resumed.
-func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface{}, parameters map[string]interface{}) (interface{}, error)) (int, error) {
+func (er *ExperimentRunner) Run(ctx context.Context, engine func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error)) (int, error) {
+	return er.RunSomeExamples(ctx, engine, "", 0)
+}
+
+// RunSomeExamples runs an engine function on all or some of the examples and scores the results
+func (er *ExperimentRunner) RunSomeExamples(ctx context.Context, engine func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error), tag string, limit int) (int, error) {
 	// Ensure experiment is loaded
 	if er.experiment == nil {
 		if er.experimentId != "" {
@@ -412,25 +431,44 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 	if err != nil {
 		return 0, fmt.Errorf("failed to get examples: %w", err)
 	}
-
+	// If tag is set, filter examples by tag
+	if tag != "" {
+		filteredExamples := make([]Example, 0, len(examples))
+		for _, example := range examples {
+			if len(example.Tags) > 0 && slices.Contains(example.Tags, tag) {
+				filteredExamples = append(filteredExamples, example)
+			}
+		}
+		examples = filteredExamples
+	}
+	// If limit is set, limit the number of examples
+	if limit > 0 {
+		examples = examples[:limit]
+	}
 	// Build a map of existing results by example ID for quick lookup
 	existingResults := make(map[string]bool)
 	if er.experiment != nil && er.experiment.Results != nil {
 		for _, result := range er.experiment.Results {
-			existingResults[result.ExampleId] = true
+			existingResults[result.Example] = true
 		}
 	}
+	// filter out examples that have results already
+	doneCnt := 0
+	notDoneExamples := make([]Example, 0, len(examples))
+	for _, example := range examples {
+		if existingResults[example.Id] {
+			doneCnt++
+		} else {
+			notDoneExamples = append(notDoneExamples, example)
+		}
+	}
+	fmt.Printf("AIQA: Running %d examples, %d done, %d not done\n", len(examples), doneCnt, len(notDoneExamples))
+	examples = notDoneExamples
 
 	// run the experiment
 	cnt := 0
 	for _, example := range examples {
-		// Skip if results already exist for this example
-		if existingResults[example.Id] {
-			fmt.Printf("AIQA: Skipping example %s (results already exist)\n", example.Id)
-			continue
-		}
-
-		scores, err := er.RunExample(ctx, example, engine)
+		_, err := er.RunExample(ctx, example, engine)
 		if err != nil {
 			// Check if callMyCode requested early termination
 			if errors.Is(err, ErrStopExperiment) || strings.HasPrefix(err.Error(), ERROR_PREFIX_STOP_EXPERIMENT) {
@@ -440,17 +478,6 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 			fmt.Printf("AIQA: Error processing example %s: %v\n", example.Id, err)
 			continue
 		}
-		for _, sr := range scores {
-			er.scores = append(er.scores, struct {
-				example Example
-				result  interface{}
-				scores  ScoreResult
-			}{
-				example: example,
-				result:  nil,
-				scores:  sr,
-			})
-		}
 		cnt++
 	}
 
@@ -459,8 +486,8 @@ func (er *ExperimentRunner) Run(ctx context.Context, engine func(input interface
 
 func (er *ExperimentRunner) getLLMCallFn(model string) LLMCallFn {
 	if er.llmCallFn != nil {
-		// wrap with tracing
-		return WithTracing(er.llmCallFn, TracingOptions{Name: "LLMCallFn"}).(LLMCallFn)
+		// TODO wrap with tracing
+		return er.llmCallFn
 	}
 	// TODO refactor with llm as judge code to do api key based OpenAI
 	return nil
@@ -478,10 +505,12 @@ func (er *ExperimentRunner) scoreLLMMetric(ctx context.Context, input, output in
 // Also calls ScoreAndStore to store the result in the server.
 // If scorerForMetricId is non-nil, metrics are taken from dataset + example; for each metric either the custom scorer is used
 // or, when metric.Type == "llm", the built-in LLM-as-judge is used (see LlmCallFn and OPENAI_API_KEY/ANTHROPIC_API_KEY).
+// callMyCode receives a context.Context as the first parameter, which can be used to propagate trace context in HTTP calls.
 func (er *ExperimentRunner) RunExample(ctx context.Context,
 	example Example,
-	callMyCode func(input interface{}, parameters map[string]interface{}) (interface{}, error),
-) ([]ScoreResult, error) {
+	callMyCode func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error),
+) (*Result, error) {
+	fmt.Printf("AIQA: RunExample %s\n", example.Id)
 	if er.experiment == nil {
 		fmt.Printf("AIQA: DEBUG RunExample creating experiment: example.id=%q example.dataset=%q example.organisation=%q runner.datasetId=%q\n",
 			example.Id, example.Dataset, example.Organisation, er.datasetId)
@@ -509,23 +538,22 @@ func (er *ExperimentRunner) RunExample(ctx context.Context,
 		fmt.Printf("AIQA: Warning: Example has no input field or spans with input attribute: %v\n", example)
 	}
 
-	scoreResult, err := er.runExampleWithParameters(ctx, example, input, callMyCode, parametersHere)
+	result, err := er.runExampleWithParameters(ctx, example, input, callMyCode, parametersHere)
 	if err != nil {
 		return nil, err
 	}
-	if scoreResult == nil {
-		return nil, nil
-	}
-	return []ScoreResult{scoreResult}, nil
+	return result, nil
 }
 
+// This function juggles two separate  contexts and spans: The experiment runner, and the example being run.
+// The spans and token counts from these must be kept separate.
 func (er *ExperimentRunner) runExampleWithParameters(
-	ctx context.Context,
+	runnerCtx context.Context,
 	example Example,
 	input interface{},
-	callMyCode func(input interface{}, parameters map[string]interface{}) (interface{}, error),
+	callMyCode func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error),
 	parameters map[string]interface{},
-) (ScoreResult, error) {
+) (*Result, error) {
 	parametersFixed := er.experiment.Parameters
 	if parametersFixed == nil {
 		parametersFixed = make(map[string]interface{})
@@ -538,12 +566,18 @@ func (er *ExperimentRunner) runExampleWithParameters(
 		parametersHere[k] = v
 	}
 
-	// Explicit OTEL span with clean attributes (example.id, input, parameters, output) instead of WithTracing's arg dump
-	var span trace.Span
+	// Explicit OTEL runExampleSpan with clean attributes (example.id, input, parameters, output)
+	// Must be in a fresh otel context so its not counted in with other activity (eg scoring or other examples)
+	// Start as a root trace (no parent span) using context.Background()
+	var runExampleSpan trace.Span
+	runExampleCtx := runnerCtx
+	if runExampleCtx == nil {
+		runExampleCtx = context.Background()
+	}
 	if _ = ensureTracingInitialized("", "", nil); tracingEnabled && tracer != nil {
-		ctx, span = tracer.Start(ctx, "runExampleWithParameters")
-		defer span.End()
-		setComponentTagIfSet(span)
+		runExampleCtx, runExampleSpan = tracer.Start(context.Background(), "RunExample")
+		defer runExampleSpan.End()
+		setComponentTagIfSet(runExampleSpan)
 		inputDict := map[string]interface{}{
 			"example.id": example.Id,
 			"input":      input,
@@ -551,7 +585,10 @@ func (er *ExperimentRunner) runExampleWithParameters(
 		if len(parametersHere) > 0 {
 			inputDict["parameters"] = parametersHere
 		}
-		span.SetAttributes(attribute.String("input", serializeValue(inputDict)))
+		runExampleSpan.SetAttributes(attribute.String("input", serializeValue(inputDict)))
+		// Set AIQA-specific attributes (used by the server to match spans to experiments, and examples to spans)
+		runExampleSpan.SetAttributes(attribute.String(AIQA_TRACE_ID, er.experimentId))
+		runExampleSpan.SetAttributes(attribute.String(AIQA_EXAMPLE_ID, example.Id))
 	}
 
 	fmt.Printf("AIQA: Running with parameters: %v\n", parametersHere)
@@ -561,14 +598,16 @@ func (er *ExperimentRunner) runExampleWithParameters(
 
 	// Parameters are also passed directly to the engine; env vars allow legacy code to read from os.Getenv
 	start := time.Now()
+	// ======================================================
 	// Call the engine function - Run the example!!
-	output, err := callMyCode(input, parametersHere)
+	// Pass context so callMyCode can propagate trace context in HTTP calls using InjectTraceContext
+	output, err := callMyCode(runExampleCtx, input, parametersHere)
 	// process the output into scores
 	duration := time.Since(start)
 	if err != nil {
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+		if runExampleSpan != nil {
+			runExampleSpan.RecordError(err)
+			runExampleSpan.SetStatus(codes.Error, err.Error())
 		}
 		restoreEnv()
 		// Preserve ErrStopEarly so Run() can detect it
@@ -578,19 +617,19 @@ func (er *ExperimentRunner) runExampleWithParameters(
 		return nil, fmt.Errorf("engine function failed: %w", err)
 	}
 
-	if span != nil {
-		span.SetAttributes(attribute.String("output", serializeValue(output)))
+	if runExampleSpan != nil {
+		runExampleSpan.SetAttributes(attribute.String("output", serializeValue(output)))
 	}
 
 	fmt.Printf("AIQA: Output: %v\n", output)
 
 	// Score the output using the local scoring functions or LLM-as-judge
-	scores, err := er.scoreExampleOutput(ctx, example, input, output, parametersHere)
+	scores, err := er.scoreExampleOutputLocal(runnerCtx, example, input, output, parametersHere)
 
 	if err != nil {
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+		if runExampleSpan != nil {
+			runExampleSpan.RecordError(err)
+			runExampleSpan.SetStatus(codes.Error, err.Error())
 		}
 		restoreEnv()
 		return nil, fmt.Errorf("failed to score example output: %w", err)
@@ -599,34 +638,33 @@ func (er *ExperimentRunner) runExampleWithParameters(
 	// Add the duration to the scores
 	scores["duration"] = float64(duration.Milliseconds())
 
-	// Prefer otel trace ID from current context so the stored Result links to this run's trace
-	exampleToStore := example
-	if otelTraceId := GetTraceId(ctx); otelTraceId != "" {
-		exampleToStore.TraceId = otelTraceId
+	result := Result{
+		Example: example.Id,
+		Trace:   GetTraceId(runExampleCtx),
 	}
 
 	fmt.Printf("AIQA: Call scoreAndStore ... for example: %s with scores: %v\n", example.Id, scores)
 	// Store the scores on the server (and trigger any server-side scoring)
-	result, err := er.ScoreAndStore(ctx, exampleToStore, output, scores)
+	remoteResult, err := er.ScoreAndStore(runnerCtx, &result, output, scores)
 	if err != nil {
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+		if runExampleSpan != nil {
+			runExampleSpan.RecordError(err)
+			runExampleSpan.SetStatus(codes.Error, err.Error())
 		}
 		restoreEnv()
 		return nil, fmt.Errorf("failed to score and store: %w", err)
 	}
-	fmt.Printf("AIQA: scoreAndStore returned: %v\n", result)
+	fmt.Printf("AIQA: scoreAndStore returned: %v\n", remoteResult)
 
-	if span != nil {
-		span.SetStatus(codes.Ok, "")
+	if runExampleSpan != nil {
+		runExampleSpan.SetStatus(codes.Ok, "")
 	}
 	restoreEnv()
-	return result, nil
+	return remoteResult, nil
 }
 
 // Run local scoring functions (the server might run more later, depending on where LLM keys are setup)
-func (er *ExperimentRunner) scoreExampleOutput(ctx context.Context, example Example, input interface{}, output interface{}, parameters map[string]interface{}) (map[string]float64, error) {
+func (er *ExperimentRunner) scoreExampleOutputLocal(ctx context.Context, example Example, input interface{}, output interface{}, parameters map[string]interface{}) (map[string]float64, error) {
 	scores := make(map[string]float64)
 	// metrics are from dataset + example (which could be unset)
 	dataset, err := er.GetDataset(ctx)

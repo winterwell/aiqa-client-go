@@ -107,6 +107,7 @@ func callOpenAI(systemPrompt, userMessage, apiKey string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Call via API directly
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", err

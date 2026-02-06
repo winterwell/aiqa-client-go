@@ -7,18 +7,16 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -40,6 +38,7 @@ var (
 	clientMutex            sync.RWMutex                                               // Mutex for thread-safe access to client state
 	attachedProviders      = make(map[*sdktrace.TracerProvider]bool)                  // Track which providers we've already attached processors to (idempotency)
 	attachedProvidersMutex sync.RWMutex                                               // Mutex for attachedProviders map
+	usingExternalProvider  bool                                                       // Whether we attached to an existing TracerProvider
 )
 
 func init() {
@@ -52,6 +51,33 @@ func init() {
 		componentTag = envTag
 	}
 }
+
+type gatingExporter struct {
+	inner   sdktrace.SpanExporter
+	enabled atomic.Bool
+}
+
+func newGatingExporter(inner sdktrace.SpanExporter, enabled bool) *gatingExporter {
+	ge := &gatingExporter{inner: inner}
+	ge.enabled.Store(enabled)
+	return ge
+}
+
+func (g *gatingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	if !g.enabled.Load() {
+		return nil
+	}
+	return g.inner.ExportSpans(ctx, spans)
+}
+
+func (g *gatingExporter) Shutdown(ctx context.Context) error {
+	return g.inner.Shutdown(ctx)
+}
+
+// func (g *gatingExporter) ForceFlush(ctx context.Context) error {
+// 	// return g.inner.ForceFlush(ctx) compiler doesnt like this
+// 	return nil
+// }
 
 // traceIDSampler implements deterministic sampling based on trace-id
 type traceIDSampler struct {
@@ -147,7 +173,11 @@ func ensureTracingInitialized(serverURL, apiKey string, samplingRateArg *float64
 	initialized = true
 
 	// Now do the actual initialization
-	return doInitTracing(serverURL, apiKey, samplingRateArg)
+	if err := doInitTracing(serverURL, apiKey, samplingRateArg); err != nil {
+		initialized = false
+		return err
+	}
+	return nil
 }
 
 // doInitTracing performs the actual tracing initialization
@@ -171,21 +201,28 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 		fmt.Printf("AIQA: WARNING: Tracing is disabled: missing required environment variables: %s\n", strings.Join(missingVars, ", "))
 		fmt.Printf("AIQA: Your application will continue to run without tracing.\n")
 
-		// Shutdown any existing tracing infrastructure to prevent spans from being sent
 		tracingEnabled = false
-		if tracerProvider != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = tracerProvider.Shutdown(ctx)
-			tracerProvider = nil
+		if ge, ok := exporter.(*gatingExporter); ok {
+			ge.enabled.Store(false)
 		}
-		if exporter != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = exporter.Shutdown(ctx)
-			exporter = nil
+
+		// If we created our own provider, shutdown to prevent spans from being sent.
+		// If we attached to an external provider, keep it intact and just gate exports.
+		if !usingExternalProvider {
+			if tracerProvider != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = tracerProvider.Shutdown(ctx)
+				tracerProvider = nil
+			}
+			if exporter != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = exporter.Shutdown(ctx)
+				exporter = nil
+			}
+			tracer = nil
 		}
-		tracer = nil
 		return nil
 	}
 
@@ -194,15 +231,17 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 	if tracerProvider != nil || exporter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if tracerProvider != nil {
+		if tracerProvider != nil && !usingExternalProvider {
 			_ = tracerProvider.Shutdown(ctx)
 			tracerProvider = nil
 		}
-		if exporter != nil {
+		if exporter != nil && !usingExternalProvider {
 			_ = exporter.Shutdown(ctx)
 			exporter = nil
 		}
-		tracer = nil
+		if !usingExternalProvider {
+			tracer = nil
+		}
 	}
 
 	tracingEnabled = true
@@ -240,25 +279,17 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 		"Authorization": fmt.Sprintf("ApiKey %s", apiKey),
 	}
 
-	otlpExporter, err := otlptracehttp.New(
-		context.Background(),
-		otlptracehttp.WithEndpoint(serverURL),
-		otlptracehttp.WithHeaders(headers),
-		otlptracehttp.WithTimeout(timeout),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create OTLP exporter: %w", err)
-	}
-	exporter = otlpExporter
-
 	// Check if a TracerProvider is already set (e.g. by the application's own OTEL init).
 	existingProvider := otel.GetTracerProvider()
 
-	// If user has their own OpenTelemetry initialization, not AIQA, then we add our AIQA exporter
-	// as an additional span processor. This means spans will be sent to both:
+	// If user has their own OpenTelemetry initialization, not AIQA:
+	// First check the env var AIQA_EXPORTER_FLAG - if set (true/false) this decides whether to add our AIQA exporter.
+	// Otherwise our logic is: If that exporter is not pointing to the same endpoint as AIQA,
+	// then we add our AIQA exporter as an additional span processor. This means spans will be sent to both:
 	// 1. The user's existing exporter(s) (if any)
 	// 2. The AIQA exporter (to AIQA server)
 	// This allows AIQA tracing to work alongside existing OTEL setups without conflicts.
+	// Output logging messages for what happens.
 	if sdkProvider, ok := existingProvider.(*sdktrace.TracerProvider); ok && sdkProvider != nil {
 		// Real provider already exists - user has their own OTEL initialization
 
@@ -269,32 +300,57 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 
 		if alreadyAttached {
 			// Already attached to this provider, skip to avoid duplicates
+			if ge, ok := exporter.(*gatingExporter); ok {
+				ge.enabled.Store(true)
+			}
 			tracer = otel.Tracer(AIQATracerName)
 			return nil
 		}
 
-		// Check if user's OTEL init is already pointing to the same endpoint
-		// This can happen if they set OTEL_EXPORTER_OTLP_ENDPOINT to AIQA_SERVER_URL
-		otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+		// First check AIQA_EXPORTER_FLAG env var - if set, use it to decide
+		aiqaExporterFlag := os.Getenv("AIQA_EXPORTER_FLAG")
 		shouldSkip := false
 
-		if otelEndpoint != "" {
-			// Normalize the OTEL endpoint for comparison
-			otelEndpointNormalized := strings.TrimRight(otelEndpoint, "/")
-			otelParsedURL, err := url.Parse(otelEndpointNormalized)
-			if err == nil && otelParsedURL.Scheme != "" {
-				otelEndpointNormalized = fmt.Sprintf("%s://%s", otelParsedURL.Scheme, otelParsedURL.Host)
-				serverURLNormalized := strings.TrimRight(serverURL, "/")
-				if otelEndpointNormalized == serverURLNormalized {
-					// User's OTEL init is already pointing to the same endpoint
-					fmt.Printf("AIQA: (skip add) User's OTEL init is already pointing to the same endpoint: %s\n", otelEndpointNormalized)
-					shouldSkip = true
+		if aiqaExporterFlag != "" {
+			// Parse the flag (case-insensitive, accepts "true", "false", "1", "0", "yes", "no")
+			aiqaExporterFlagLower := strings.ToLower(strings.TrimSpace(aiqaExporterFlag))
+			if aiqaExporterFlagLower == "false" || aiqaExporterFlagLower == "0" || aiqaExporterFlagLower == "no" {
+				// Explicitly disabled - skip adding our exporter
+				fmt.Printf("AIQA: (skip add) AIQA_EXPORTER_FLAG is set to false, not adding AIQA exporter\n")
+				shouldSkip = true
+			} else if aiqaExporterFlagLower == "true" || aiqaExporterFlagLower == "1" || aiqaExporterFlagLower == "yes" {
+				// Explicitly enabled - add our exporter
+				fmt.Printf("AIQA: AIQA_EXPORTER_FLAG is set to true, adding AIQA exporter: %s\n", serverURL)
+			} else {
+				// Invalid value - log warning and fall through to default logic
+				fmt.Printf("AIQA: WARNING: Invalid AIQA_EXPORTER_FLAG value '%s' (expected true/false), using default logic\n", aiqaExporterFlag)
+			}
+		}
+
+		// If AIQA_EXPORTER_FLAG wasn't set or had invalid value, use default logic:
+		// Check if user's OTEL init is already pointing to the same endpoint
+		// This can happen if they set OTEL_EXPORTER_OTLP_ENDPOINT to AIQA_SERVER_URL
+		if !shouldSkip && aiqaExporterFlag == "" {
+			otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+			if otelEndpoint != "" {
+				// Normalize the OTEL endpoint for comparison
+				otelEndpointNormalized := strings.TrimRight(otelEndpoint, "/")
+				otelParsedURL, err := url.Parse(otelEndpointNormalized)
+				if err == nil && otelParsedURL.Scheme != "" {
+					otelEndpointNormalized = fmt.Sprintf("%s://%s", otelParsedURL.Scheme, otelParsedURL.Host)
+					serverURLNormalized := strings.TrimRight(serverURL, "/")
+					if otelEndpointNormalized == serverURLNormalized {
+						// User's OTEL init is already pointing to the same endpoint
+						fmt.Printf("AIQA: (skip add) User's OTEL init is already pointing to the same endpoint: %s\n", otelEndpointNormalized)
+						shouldSkip = true
+					}
 				}
 			}
 		}
 
 		if shouldSkip {
-			// User's OTEL init already configured correctly - skip adding our exporter
+			// Skip adding our exporter (either explicitly disabled or already pointing to same endpoint)
 			// Mark as attached so we don't try again
 			attachedProvidersMutex.Lock()
 			attachedProviders[sdkProvider] = true
@@ -303,9 +359,23 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 			return nil
 		}
 
+		otlpExporter, err := otlptracehttp.New(
+			context.Background(),
+			otlptracehttp.WithEndpoint(serverURL),
+			otlptracehttp.WithHeaders(headers),
+			otlptracehttp.WithTimeout(timeout),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create OTLP exporter: %w", err)
+		}
+		exporter = newGatingExporter(otlpExporter, true)
+
 		// Add our span processor to the existing provider
 		// Our exporter ensures the API key header is set correctly for AIQA authentication
-		fmt.Printf("AIQA: Adding span processor to existing provider: %s\n", serverURL)
+		if aiqaExporterFlag == "" {
+			// Only log this message if we're using default logic (not when explicitly enabled)
+			fmt.Printf("AIQA: Adding span processor to existing provider: %s\n", serverURL)
+		}
 		bsp := sdktrace.NewBatchSpanProcessor(exporter)
 		sdkProvider.RegisterSpanProcessor(bsp)
 
@@ -314,9 +384,22 @@ func doInitTracing(serverURL, apiKey string, samplingRateArg *float64) error {
 		attachedProviders[sdkProvider] = true
 		attachedProvidersMutex.Unlock()
 
+		usingExternalProvider = true
 		tracer = otel.Tracer(AIQATracerName)
 		return nil
 	}
+
+	otlpExporter, err := otlptracehttp.New(
+		context.Background(),
+		otlptracehttp.WithEndpoint(serverURL),
+		otlptracehttp.WithHeaders(headers),
+		otlptracehttp.WithTimeout(timeout),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create OTLP exporter: %w", err)
+	}
+	exporter = newGatingExporter(otlpExporter, true)
+	usingExternalProvider = false
 
 	// No real provider exists, create a new one
 	res, err := resource.New(
@@ -356,331 +439,36 @@ func FlushSpans(ctx context.Context) error {
 }
 
 // ShutdownTracing shuts down the tracer provider and exporter.
-// Note: If InitTracing detected and used an existing TracerProvider, calling this
-// will shutdown the entire provider, which may affect other tracing systems. Use with caution.
+// Note: If InitTracing attached to an existing TracerProvider, this will only
+// gate exports rather than shutting down the shared provider.
 // Resets initialized so a subsequent InitTracing/GetAIQAClient can re-initialize.
 func ShutdownTracing(ctx context.Context) error {
-	if tracerProvider != nil {
-		if err := tracerProvider.Shutdown(ctx); err != nil {
-			return err
+	if usingExternalProvider {
+		if ge, ok := exporter.(*gatingExporter); ok {
+			ge.enabled.Store(false)
 		}
-		tracerProvider = nil
-		// Reset global so next InitTracing doesn't reuse a shut-down provider (which would yield non-recording spans)
-		otel.SetTracerProvider(sdktrace.NewTracerProvider())
+		tracingEnabled = false
+	} else {
+		if tracerProvider != nil {
+			if err := tracerProvider.Shutdown(ctx); err != nil {
+				return err
+			}
+			tracerProvider = nil
+			// Reset global so next InitTracing doesn't reuse a shut-down provider (which would yield non-recording spans)
+			otel.SetTracerProvider(sdktrace.NewTracerProvider())
+		}
+		if exporter != nil {
+			_ = exporter.Shutdown(ctx)
+			exporter = nil
+		}
+		tracer = nil
+		tracingEnabled = false
+		usingExternalProvider = false
 	}
-	exporter = nil
-	tracer = nil
-	tracingEnabled = false
 	initMutex.Lock()
 	initialized = false
 	initMutex.Unlock()
 	return nil
-}
-
-// WithTracing wraps a function to automatically create spans
-func WithTracing(fn interface{}, options ...TracingOptions) interface{} {
-	opt := TracingOptions{}
-	if len(options) > 0 {
-		opt = options[0]
-	}
-
-	fnValue := reflect.ValueOf(fn)
-	fnType := fnValue.Type()
-
-	if fnType.Kind() != reflect.Func {
-		panic("WithTracing: argument must be a function")
-	}
-
-	// Get function name
-	fnName := opt.Name
-	if fnName == "" {
-		fnName = runtime.FuncForPC(fnValue.Pointer()).Name()
-		if idx := strings.LastIndex(fnName, "."); idx >= 0 {
-			fnName = fnName[idx+1:]
-		}
-	}
-
-	// Check if already traced
-	if fnValue.Kind() == reflect.Func {
-		// Check for _isTraced field (not possible in Go, but we can track it differently)
-		// For now, we'll just wrap it
-	}
-
-	return wrapFunction(fnValue, fnType, fnName, opt)
-}
-
-// wrapFunction wraps a function to automatically create spans
-func wrapFunction(fnValue reflect.Value, fnType reflect.Type, fnName string, opt TracingOptions) interface{} {
-	wrapper := reflect.MakeFunc(fnType, func(args []reflect.Value) []reflect.Value {
-		// Lazy initialization: ensure tracing is initialized before creating spans
-		// This is called lazily when the function runs, not at decorator definition time
-		if !initialized {
-			_ = ensureTracingInitialized("", "", nil)
-		}
-
-		// If tracing is disabled, just execute the function without creating spans
-		if !tracingEnabled || tracer == nil {
-			return fnValue.Call(args)
-		}
-
-		ctx := context.Background()
-		if len(args) > 0 {
-			if ctxVal := args[0]; ctxVal.Type().String() == "context.Context" {
-				ctx = ctxVal.Interface().(context.Context)
-			}
-		}
-
-		// Start a new span (always create a child span for the traced function)
-		ctx, span := tracer.Start(ctx, fnName)
-		defer span.End()
-
-		// Set component tag if configured
-		setComponentTagIfSet(span)
-
-		// Prepare input
-		input := prepareInput(args, opt)
-		if input != nil {
-			span.SetAttributes(attribute.String("input", serializeValue(input)))
-		}
-
-		// Execute function
-		results := fnValue.Call(args)
-
-		// Handle results
-		if len(results) > 0 {
-			output := prepareOutput(results, opt)
-			if output != nil {
-				// Extract and set token usage before setting output
-				extractAndSetTokenUsage(span, output)
-				// Extract and set provider/model before setting output
-				extractAndSetProviderAndModel(span, output)
-				span.SetAttributes(attribute.String("output", serializeValue(output)))
-			}
-
-			// Check for error (last return value)
-			lastResult := results[len(results)-1]
-			if lastResult.Type().String() == "error" {
-				if !lastResult.IsNil() {
-					err := lastResult.Interface().(error)
-					span.RecordError(err)
-					span.SetStatus(codes.Error, err.Error())
-				} else {
-					span.SetStatus(codes.Ok, "")
-				}
-			} else {
-				span.SetStatus(codes.Ok, "")
-			}
-		} else {
-			span.SetStatus(codes.Ok, "")
-		}
-
-		return results
-	})
-
-	return wrapper.Interface()
-}
-
-// matchesIgnorePattern checks if a key matches any pattern in the ignore list.
-// Supports simple wildcards (e.g., "_*" matches "_apple", "_fruit").
-func matchesIgnorePattern(key string, ignorePatterns []string) bool {
-	for _, pattern := range ignorePatterns {
-		// Simple wildcard matching
-		if strings.Contains(pattern, "*") || strings.Contains(pattern, "?") {
-			// Use simple glob matching
-			if matched, _ := filepath.Match(pattern, key); matched {
-				return true
-			}
-		} else {
-			// Exact match for non-wildcard patterns
-			if key == pattern {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// applyIgnorePatterns applies ignore patterns to a map, optionally recursively.
-// Supports string keys, wildcard patterns (*), and list of patterns.
-func applyIgnorePatterns(dataDict map[string]interface{}, ignorePatterns []string, recursive bool, maxDepth, currentDepth int) map[string]interface{} {
-	// Safety check: prevent infinite loops from extremely deep nesting
-	if currentDepth >= maxDepth {
-		return dataDict
-	}
-
-	// If no patterns, return copy (no filtering needed, even if recursive=true)
-	if len(ignorePatterns) == 0 {
-		result := make(map[string]interface{})
-		for k, v := range dataDict {
-			result[k] = v
-		}
-		return result
-	}
-
-	result := make(map[string]interface{})
-	for key, value := range dataDict {
-		// Skip keys that match ignore patterns
-		if matchesIgnorePattern(key, ignorePatterns) {
-			continue
-		}
-
-		// Recursively process nested dictionaries if recursive=true
-		if recursive {
-			if nestedMap, ok := value.(map[string]interface{}); ok {
-				result[key] = applyIgnorePatterns(nestedMap, ignorePatterns, recursive, maxDepth, currentDepth+1)
-			} else {
-				result[key] = value
-			}
-		} else {
-			result[key] = value
-		}
-	}
-
-	return result
-}
-
-// mergeWithDefaultIgnorePatterns merges user-provided ignore patterns with client's default ignore patterns.
-func mergeWithDefaultIgnorePatterns(ignorePatterns []string) []string {
-	clientMutex.RLock()
-	defaultPatterns := make([]string, len(defaultIgnorePatterns))
-	copy(defaultPatterns, defaultIgnorePatterns)
-	clientMutex.RUnlock()
-
-	if ignorePatterns == nil {
-		return defaultPatterns
-	}
-
-	// Merge patterns, avoiding duplicates
-	merged := make([]string, len(defaultPatterns))
-	copy(merged, defaultPatterns)
-	for _, pattern := range ignorePatterns {
-		found := false
-		for _, existing := range merged {
-			if existing == pattern {
-				found = true
-				break
-			}
-		}
-		if !found {
-			merged = append(merged, pattern)
-		}
-	}
-	return merged
-}
-
-// prepareInput prepares function input for span attributes
-// Applies filter_input first, then applies ignore_input with default patterns merged
-func prepareInput(args []reflect.Value, opt TracingOptions) interface{} {
-	if len(args) == 0 {
-		return nil
-	}
-
-	// Filter out context if present
-	filteredArgs := make([]reflect.Value, 0, len(args))
-	for _, arg := range args {
-		if arg.Type().String() != "context.Context" {
-			filteredArgs = append(filteredArgs, arg)
-		}
-	}
-
-	if len(filteredArgs) == 0 {
-		return nil
-	}
-
-	var result interface{}
-	if len(filteredArgs) == 1 {
-		result = filteredArgs[0].Interface()
-	} else {
-		// Multiple args - combine into map
-		resultMap := make(map[string]interface{})
-		for i, arg := range filteredArgs {
-			key := fmt.Sprintf("arg%d", i)
-			resultMap[key] = arg.Interface()
-		}
-		result = resultMap
-	}
-
-	// Apply filter_input if provided
-	if opt.FilterInput != nil {
-		result = opt.FilterInput(result)
-	}
-
-	// Merge with default ignore patterns
-	mergedIgnoreInput := mergeWithDefaultIgnorePatterns(opt.IgnoreInput)
-
-	// Apply ignore_input patterns if result is a map
-	if resultMap, ok := result.(map[string]interface{}); ok && len(mergedIgnoreInput) > 0 {
-		clientMutex.RLock()
-		recursive := ignoreRecursive
-		clientMutex.RUnlock()
-		result = applyIgnorePatterns(resultMap, mergedIgnoreInput, recursive, 100, 0)
-		// If result is empty after filtering, return nil
-		if len(result.(map[string]interface{})) == 0 {
-			return nil
-		}
-	}
-
-	return result
-}
-
-// prepareOutput prepares function output for span attributes
-// Applies filter_output first, then applies ignore_output with default patterns merged
-func prepareOutput(results []reflect.Value, opt TracingOptions) interface{} {
-	if len(results) == 0 {
-		return nil
-	}
-
-	// Filter out error if present
-	filteredResults := make([]reflect.Value, 0, len(results))
-	for _, result := range results {
-		if result.Type().String() != "error" {
-			filteredResults = append(filteredResults, result)
-		}
-	}
-
-	if len(filteredResults) == 0 {
-		return nil
-	}
-
-	var result interface{}
-	if len(filteredResults) == 1 {
-		result = filteredResults[0].Interface()
-	} else {
-		// Multiple results - combine into map
-		resultMap := make(map[string]interface{})
-		for i, res := range filteredResults {
-			key := fmt.Sprintf("result%d", i)
-			resultMap[key] = res.Interface()
-		}
-		result = resultMap
-	}
-
-	// Apply filter_output if provided
-	if opt.FilterOutput != nil {
-		// Make a copy if it's a map to avoid mutating the original
-		if resultMap, ok := result.(map[string]interface{}); ok {
-			resultMapCopy := make(map[string]interface{})
-			for k, v := range resultMap {
-				resultMapCopy[k] = v
-			}
-			result = opt.FilterOutput(resultMapCopy)
-		} else {
-			result = opt.FilterOutput(result)
-		}
-	}
-
-	// Merge with default ignore patterns
-	mergedIgnoreOutput := mergeWithDefaultIgnorePatterns(opt.IgnoreOutput)
-
-	// Apply ignore_output patterns if result is a map
-	if resultMap, ok := result.(map[string]interface{}); ok && len(mergedIgnoreOutput) > 0 {
-		clientMutex.RLock()
-		recursive := ignoreRecursive
-		clientMutex.RUnlock()
-		result = applyIgnorePatterns(resultMap, mergedIgnoreOutput, recursive, 100, 0)
-	}
-
-	return result
 }
 
 // serializeValue serializes a value to JSON string for span attributes
@@ -693,289 +481,29 @@ func serializeValue(value interface{}) string {
 // SetSpanAttribute sets an attribute on the active span
 func SetSpanAttribute(ctx context.Context, attributeName string, attributeValue interface{}) bool {
 	span := trace.SpanFromContext(ctx)
-	if span.IsRecording() {
-		span.SetAttributes(attribute.String(attributeName, serializeValue(attributeValue)))
-		return true
-	}
-	return false
-}
-
-// extractAndSetTokenUsage extracts OpenAI API style token usage from result and adds to span attributes
-// using OpenTelemetry semantic conventions for gen_ai.
-// Only sets attributes that are not already set.
-//
-// This function detects token usage from OpenAI API response patterns:
-//   - OpenAI Chat Completions API: The 'usage' object contains 'prompt_tokens', 'completion_tokens', and 'total_tokens'.
-//     See https://platform.openai.com/docs/api-reference/chat/object (usage field)
-//   - OpenAI Completions API: The 'usage' object contains 'prompt_tokens', 'completion_tokens', and 'total_tokens'.
-//     See https://platform.openai.com/docs/api-reference/completions/object (usage field)
-//
-// This function is safe against exceptions and will not derail tracing or program execution.
-func extractAndSetTokenUsage(span trace.Span, result interface{}) {
-	defer func() {
-		// Catch any panics to ensure this never derails tracing
-		if r := recover(); r != nil {
-			// Silently ignore errors
-		}
-	}()
-
 	if !span.IsRecording() {
-		return
+		return false
 	}
 
-	var usage map[string]interface{}
-
-	// Check if result is a map with 'usage' key
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		if usageVal, exists := resultMap["usage"]; exists {
-			if usageMap, ok := usageVal.(map[string]interface{}); ok {
-				usage = usageMap
-			}
-		} else {
-			// Check if result itself is a usage dict (OpenAI format)
-			if _, hasPrompt := resultMap["prompt_tokens"]; hasPrompt {
-				if _, hasCompletion := resultMap["completion_tokens"]; hasCompletion {
-					if _, hasTotal := resultMap["total_tokens"]; hasTotal {
-						usage = resultMap
-					}
-				}
-			} else if _, hasInput := resultMap["input_tokens"]; hasInput {
-				// Bedrock format
-				if _, hasOutput := resultMap["output_tokens"]; hasOutput {
-					usage = resultMap
-				}
-			}
-		}
+	if attributeValue == nil {
+		return false
 	}
 
-	// Check if result has a 'Usage' field (struct with Usage field, e.g., OpenAI response object)
-	if usage == nil {
-		resultVal := reflect.ValueOf(result)
-		if resultVal.Kind() == reflect.Ptr {
-			resultVal = resultVal.Elem()
+	value := reflect.ValueOf(attributeValue)
+	for value.Kind() == reflect.Ptr {
+		if value.IsNil() {
+			return false
 		}
-		if resultVal.Kind() == reflect.Struct {
-			usageField := resultVal.FieldByName("Usage")
-			if !usageField.IsValid() {
-				usageField = resultVal.FieldByName("usage")
-			}
-			if usageField.IsValid() && usageField.CanInterface() {
-				if usageMap, ok := usageField.Interface().(map[string]interface{}); ok {
-					usage = usageMap
-				} else if usageField.Kind() == reflect.Struct {
-					// Convert struct to map
-					usage = make(map[string]interface{})
-					usageType := usageField.Type()
-					for i := 0; i < usageField.NumField(); i++ {
-						field := usageField.Field(i)
-						if field.CanInterface() {
-							fieldName := usageType.Field(i).Name
-							usage[fieldName] = field.Interface()
-						}
-					}
-				}
-			}
-		}
+		value = value.Elem()
+	}
+	attributeValue = value.Interface()
+
+	if s, ok := attributeValue.(string); ok && s == "" {
+		return false
 	}
 
-	// Extract token usage if found
-	if usage != nil {
-		// Get token values safely
-		// Support both OpenAI format (prompt_tokens/completion_tokens) and Bedrock format (input_tokens/output_tokens)
-		var promptTokens, completionTokens, totalTokens interface{}
-		if val, ok := usage["prompt_tokens"]; ok {
-			promptTokens = val
-		} else if val, ok := usage["PromptTokens"]; ok {
-			promptTokens = val
-		} else if val, ok := usage["input_tokens"]; ok {
-			// Bedrock format
-			promptTokens = val
-		} else if val, ok := usage["InputTokens"]; ok {
-			// Bedrock format (capitalized)
-			promptTokens = val
-		}
-
-		if val, ok := usage["completion_tokens"]; ok {
-			completionTokens = val
-		} else if val, ok := usage["CompletionTokens"]; ok {
-			completionTokens = val
-		} else if val, ok := usage["output_tokens"]; ok {
-			// Bedrock format
-			completionTokens = val
-		} else if val, ok := usage["OutputTokens"]; ok {
-			// Bedrock format (capitalized)
-			completionTokens = val
-		}
-
-		if val, ok := usage["total_tokens"]; ok {
-			totalTokens = val
-		} else if val, ok := usage["TotalTokens"]; ok {
-			totalTokens = val
-		}
-
-		// Calculate total_tokens if not provided but we have input and output
-		if totalTokens == nil && promptTokens != nil && completionTokens != nil {
-			// Try to calculate total
-			var inputVal, outputVal float64
-			if inputInt, ok := promptTokens.(int); ok {
-				inputVal = float64(inputInt)
-			} else if inputInt64, ok := promptTokens.(int64); ok {
-				inputVal = float64(inputInt64)
-			} else if inputFloat, ok := promptTokens.(float64); ok {
-				inputVal = inputFloat
-			}
-			if outputInt, ok := completionTokens.(int); ok {
-				outputVal = float64(outputInt)
-			} else if outputInt64, ok := completionTokens.(int64); ok {
-				outputVal = float64(outputInt64)
-			} else if outputFloat, ok := completionTokens.(float64); ok {
-				outputVal = outputFloat
-			}
-			if inputVal > 0 && outputVal > 0 {
-				totalTokens = int(inputVal + outputVal)
-			}
-		}
-
-		// Set attributes if found
-		if promptTokens != nil {
-			if tokens, ok := promptTokens.(int); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", tokens))
-			} else if tokens, ok := promptTokens.(int64); ok {
-				span.SetAttributes(attribute.Int64("gen_ai.usage.input_tokens", tokens))
-			} else if tokens, ok := promptTokens.(float64); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", int(tokens)))
-			}
-		}
-
-		if completionTokens != nil {
-			if tokens, ok := completionTokens.(int); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.output_tokens", tokens))
-			} else if tokens, ok := completionTokens.(int64); ok {
-				span.SetAttributes(attribute.Int64("gen_ai.usage.output_tokens", tokens))
-			} else if tokens, ok := completionTokens.(float64); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.output_tokens", int(tokens)))
-			}
-		}
-
-		if totalTokens != nil {
-			if tokens, ok := totalTokens.(int); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.total_tokens", tokens))
-			} else if tokens, ok := totalTokens.(int64); ok {
-				span.SetAttributes(attribute.Int64("gen_ai.usage.total_tokens", tokens))
-			} else if tokens, ok := totalTokens.(float64); ok {
-				span.SetAttributes(attribute.Int("gen_ai.usage.total_tokens", int(tokens)))
-			}
-		}
-	}
-}
-
-// extractAndSetProviderAndModel extracts provider and model information from result and adds to span attributes
-// using OpenTelemetry semantic conventions for gen_ai.
-// Only sets attributes that are not already set.
-//
-// This function detects model information from common API response patterns:
-//   - OpenAI Chat Completions API: The 'model' field is at the top level of the response.
-//     See https://platform.openai.com/docs/api-reference/chat/object
-//   - OpenAI Completions API: The 'model' field is at the top level of the response.
-//     See https://platform.openai.com/docs/api-reference/completions/object
-//
-// This function is safe against exceptions and will not derail tracing or program execution.
-func extractAndSetProviderAndModel(span trace.Span, result interface{}) {
-	defer func() {
-		// Catch any panics to ensure this never derails tracing
-		if r := recover(); r != nil {
-			// Silently ignore errors
-		}
-	}()
-
-	if !span.IsRecording() {
-		return
-	}
-
-	var model, provider interface{}
-
-	// Check if result is a map
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		model = resultMap["model"]
-		if model == nil {
-			model = resultMap["Model"]
-		}
-		provider = resultMap["provider"]
-		if provider == nil {
-			provider = resultMap["Provider"]
-		}
-		if provider == nil {
-			provider = resultMap["provider_name"]
-		}
-		if provider == nil {
-			provider = resultMap["providerName"]
-		}
-
-		// Check for model in choices (OpenAI pattern)
-		if model == nil {
-			if choices, ok := resultMap["choices"].([]interface{}); ok && len(choices) > 0 {
-				if firstChoice, ok := choices[0].(map[string]interface{}); ok {
-					model = firstChoice["model"]
-					if model == nil {
-						model = firstChoice["Model"]
-					}
-				}
-			}
-		}
-	}
-
-	// Check if result has Model/Provider fields (struct, e.g., OpenAI response object)
-	if model == nil || provider == nil {
-		resultVal := reflect.ValueOf(result)
-		if resultVal.Kind() == reflect.Ptr {
-			resultVal = resultVal.Elem()
-		}
-		if resultVal.Kind() == reflect.Struct {
-			if model == nil {
-				modelField := resultVal.FieldByName("Model")
-				if !modelField.IsValid() {
-					modelField = resultVal.FieldByName("model")
-				}
-				if modelField.IsValid() && modelField.CanInterface() {
-					model = modelField.Interface()
-				}
-			}
-			if provider == nil {
-				providerField := resultVal.FieldByName("Provider")
-				if !providerField.IsValid() {
-					providerField = resultVal.FieldByName("provider")
-				}
-				if !providerField.IsValid() {
-					providerField = resultVal.FieldByName("ProviderName")
-				}
-				if !providerField.IsValid() {
-					providerField = resultVal.FieldByName("provider_name")
-				}
-				if providerField.IsValid() && providerField.CanInterface() {
-					provider = providerField.Interface()
-				}
-			}
-		}
-	}
-
-	// Set attributes if found
-	if model != nil {
-		if modelStr, ok := model.(string); ok && modelStr != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", modelStr))
-		} else {
-			// Convert to string if needed
-			span.SetAttributes(attribute.String("gen_ai.request.model", fmt.Sprintf("%v", model)))
-		}
-	}
-
-	if provider != nil {
-		if providerStr, ok := provider.(string); ok && providerStr != "" {
-			span.SetAttributes(attribute.String("gen_ai.provider.name", providerStr))
-		} else {
-			// Convert to string if needed
-			span.SetAttributes(attribute.String("gen_ai.provider.name", fmt.Sprintf("%v", provider)))
-		}
-	}
+	span.SetAttributes(attribute.String(attributeName, serializeValue(attributeValue)))
+	return true
 }
 
 // setComponentTagIfSet sets the component tag on a span if it's configured
@@ -1005,11 +533,13 @@ func SetConversationId(ctx context.Context, conversationId string) bool {
 // This allows you to explicitly record token usage information.
 // See https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/ for more details.
 //
+// All arguments may be nil. They can be *int, *int32, int, int32, int64, or float64.
 // inputTokens: Number of input tokens used (maps to gen_ai.usage.input_tokens)
 // outputTokens: Number of output tokens generated (maps to gen_ai.usage.output_tokens)
 // totalTokens: Total number of tokens used (maps to gen_ai.usage.total_tokens)
+// cachedInputTokens: Number of cached input tokens used (maps to gen_ai.usage.cached_input_tokens)
 // Returns: True if at least one token usage attribute was set, False if no active span found
-func SetTokenUsage(ctx context.Context, inputTokens *int, outputTokens *int, totalTokens *int) bool {
+func SetTokenUsage(ctx context.Context, inputTokens interface{}, outputTokens interface{}, totalTokens interface{}, cachedInputTokens interface{}) bool {
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return false
@@ -1023,20 +553,52 @@ func SetTokenUsage(ctx context.Context, inputTokens *int, outputTokens *int, tot
 		}
 	}()
 
-	if inputTokens != nil {
-		span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", *inputTokens))
+	if v := normalizeTokenCount(inputTokens); v != nil {
+		span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", *v))
 		setCount++
 	}
-	if outputTokens != nil {
-		span.SetAttributes(attribute.Int("gen_ai.usage.output_tokens", *outputTokens))
+	if v := normalizeTokenCount(outputTokens); v != nil {
+		span.SetAttributes(attribute.Int("gen_ai.usage.output_tokens", *v))
 		setCount++
 	}
-	if totalTokens != nil {
-		span.SetAttributes(attribute.Int("gen_ai.usage.total_tokens", *totalTokens))
+	if v := normalizeTokenCount(totalTokens); v != nil {
+		span.SetAttributes(attribute.Int("gen_ai.usage.total_tokens", *v))
+		setCount++
+	}
+	if v := normalizeTokenCount(cachedInputTokens); v != nil {
+		span.SetAttributes(attribute.Int("gen_ai.usage.cached_input_tokens", *v))
 		setCount++
 	}
 
 	return setCount > 0
+}
+
+func normalizeTokenCount(value interface{}) *int {
+	if value == nil {
+		return nil
+	}
+
+	v := reflect.ValueOf(value)
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+
+	switch v.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n := int(v.Int())
+		return &n
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n := int(v.Uint())
+		return &n
+	case reflect.Float32, reflect.Float64:
+		n := int(v.Float())
+		return &n
+	default:
+		return nil
+	}
 }
 
 // SetProviderAndModel sets provider and model attributes on the active span using OpenTelemetry semantic conventions for gen_ai.
@@ -1331,12 +893,12 @@ func SubmitFeedback(ctx context.Context, traceId string, feedback FeedbackOption
 	// Set feedback attributes
 	if feedback.ThumbsUp != nil {
 		if *feedback.ThumbsUp {
-			span.SetAttributes(attribute.String("feedback", "positive"))
+			span.SetAttributes(attribute.String("feedback.value", "positive"))
 		} else {
-			span.SetAttributes(attribute.String("feedback", "negative"))
+			span.SetAttributes(attribute.String("feedback.value", "negative"))
 		}
 	} else {
-		span.SetAttributes(attribute.String("feedback", "neutral"))
+		span.SetAttributes(attribute.String("feedback.value", "neutral"))
 	}
 
 	if feedback.Comment != "" {

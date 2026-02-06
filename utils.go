@@ -53,19 +53,19 @@ func BuildHeaders(apiKey string) map[string]string {
 		"Content-Type":    "application/json",
 		"Accept-Encoding": "gzip, deflate", // br omitted: stdlib does not decompress Brotli; server may still send gzip
 	}
-	
+
 	// Check parameter first
 	if apiKey != "" {
 		headers["Authorization"] = fmt.Sprintf("ApiKey %s", apiKey)
 		return headers
 	}
-	
+
 	// Check AIQA_API_KEY env var
 	if envKey := os.Getenv("AIQA_API_KEY"); envKey != "" {
 		headers["Authorization"] = fmt.Sprintf("ApiKey %s", envKey)
 		return headers
 	}
-	
+
 	// Fallback to OTLP headers (format: "key1=value1,key2=value2")
 	if otlpHeaders := os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"); otlpHeaders != "" {
 		// Parse comma-separated key=value pairs
@@ -82,7 +82,7 @@ func BuildHeaders(apiKey string) map[string]string {
 			}
 		}
 	}
-	
+
 	return headers
 }
 
@@ -93,17 +93,17 @@ func GetServerURL(serverURL string) string {
 	if serverURL != "" {
 		return strings.TrimRight(serverURL, "/")
 	}
-	
+
 	// Check AIQA_SERVER_URL env var
 	if url := os.Getenv("AIQA_SERVER_URL"); url != "" {
 		return strings.TrimRight(url, "/")
 	}
-	
+
 	// Fallback to OTLP endpoint
 	if url := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); url != "" {
 		return strings.TrimRight(url, "/")
 	}
-	
+
 	// Default fallback
 	return "https://server-aiqa.winterwell.com"
 }
@@ -115,12 +115,12 @@ func GetAPIKey(apiKey string) string {
 	if apiKey != "" {
 		return apiKey
 	}
-	
+
 	// Check AIQA_API_KEY env var
 	if envKey := os.Getenv("AIQA_API_KEY"); envKey != "" {
 		return envKey
 	}
-	
+
 	// Fallback to OTLP headers (look for Authorization header)
 	if otlpHeaders := os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"); otlpHeaders != "" {
 		for _, headerPair := range strings.Split(otlpHeaders, ",") {
@@ -138,7 +138,7 @@ func GetAPIKey(apiKey string) string {
 			}
 		}
 	}
-	
+
 	return ""
 }
 
@@ -167,6 +167,17 @@ func makeRequest(ctx context.Context, method, url string, body interface{}, apiK
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+
+	// TODO first separate experiment-runner traces from callMyCode traces
+	// Then inject trace id
+	// // Inject trace context into HTTP headers to preserve trace-id across HTTP calls
+	// // This ensures that when callMyCode makes HTTP requests, the trace context is propagated
+	// traceHeaders := make(map[string]string)
+	// InjectTraceContext(ctx, traceHeaders)
+	// // Copy injected headers to request (these are trace context headers like traceparent, tracestate)
+	// for k, v := range traceHeaders {
+	// 	req.Header.Set(k, v)
+	// }
 
 	resp, err := defaultHTTPClient.Do(req)
 	if err != nil {
