@@ -120,7 +120,7 @@ func getEnabledFilters() map[string]bool {
 }
 
 // isJWTToken checks if a value looks like a JWT token (starts with "eyJ" and has 3 parts separated by dots)
-func isJWTToken(value interface{}) bool {
+func isJWTToken(value any) bool {
 	str, ok := value.(string)
 	if !ok {
 		return false
@@ -132,7 +132,7 @@ func isJWTToken(value interface{}) bool {
 }
 
 // isAPIKey checks if a value looks like an API key based on common patterns
-func isAPIKey(value interface{}) bool {
+func isAPIKey(value any) bool {
 	str, ok := value.(string)
 	if !ok {
 		return false
@@ -149,7 +149,7 @@ func isAPIKey(value interface{}) bool {
 }
 
 // applyDataFilters applies data filters to a key-value pair based on enabled filters
-func applyDataFilters(key string, value interface{}) interface{} {
+func applyDataFilters(key string, value any) any {
 	// Don't filter falsy values
 	if value == nil {
 		return value
@@ -219,7 +219,7 @@ func applyDataFilters(key string, value interface{}) interface{} {
 // Handles objects that might raise exceptions during string conversion
 // Uses AIQA_MAX_OBJECT_STR_CHARS environment variable to limit length
 // Also sanitizes surrogate characters to prevent UTF-8 encoding errors
-func safeStrRepr(value interface{}) string {
+func safeStrRepr(value any) string {
 	maxChars := GetMaxObjectStrChars()
 
 	// Try to get string representation
@@ -255,7 +255,7 @@ func safeStrRepr(value interface{}) string {
 // SerializeForSpan serializes a value for span attributes
 // OpenTelemetry only accepts primitives (bool, string, bytes, int, float) or sequences of those
 // Complex types (maps, structs) are converted to JSON strings
-func SerializeForSpan(value interface{}) interface{} {
+func SerializeForSpan(value any) any {
 	if value == nil {
 		return nil
 	}
@@ -301,21 +301,21 @@ func SerializeForSpan(value interface{}) interface{} {
 }
 
 // filterDataRecursive recursively applies data filters to nested structures
-func filterDataRecursive(data interface{}) interface{} {
+func filterDataRecursive(data any) any {
 	if data == nil {
 		return data
 	}
 
 	switch v := data.(type) {
-	case map[string]interface{}:
-		result := make(map[string]interface{})
+	case map[string]any:
+		result := make(map[string]any)
 		for k, val := range v {
 			filteredVal := applyDataFilters(k, val)
 			result[k] = filterDataRecursive(filteredVal)
 		}
 		return result
-	case []interface{}:
-		result := make([]interface{}, len(v))
+	case []any:
+		result := make([]any, len(v))
 		for i, item := range v {
 			result[i] = filterDataRecursive(item)
 		}
@@ -327,13 +327,13 @@ func filterDataRecursive(data interface{}) interface{} {
 		if err != nil {
 			return applyDataFilters("", v)
 		}
-		var jsonData interface{}
+		var jsonData any
 		if err := json.Unmarshal(jsonBytes, &jsonData); err != nil {
 			return applyDataFilters("", v)
 		}
 		// Check if unmarshaled data is still a primitive type to avoid infinite recursion
 		switch jsonData.(type) {
-		case map[string]interface{}, []interface{}:
+		case map[string]any, []any:
 			return filterDataRecursive(jsonData)
 		default:
 			// Primitive type, just apply filters and return
@@ -344,7 +344,7 @@ func filterDataRecursive(data interface{}) interface{} {
 
 // SerializeValue serializes a value to JSON string for span attributes
 // Applies data filters before serialization
-func SerializeValue(value interface{}) string {
+func SerializeValue(value any) string {
 	// Apply data filters before serialization
 	filteredValue := filterDataRecursive(value)
 

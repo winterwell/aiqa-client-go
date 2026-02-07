@@ -39,7 +39,7 @@ func TestToJSONOrString(t *testing.T) {
 	if toJSONOrString("hello") != "hello" {
 		t.Error("string should pass through")
 	}
-	m := map[string]interface{}{"a": 1}
+	m := map[string]any{"a": 1}
 	s := toJSONOrString(m)
 	if s != `{"a":1}` && s != `{"a": 1}` {
 		t.Errorf("map should JSON marshal, got %q", s)

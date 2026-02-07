@@ -26,7 +26,7 @@ type LLMCallFn func(systemPrompt, userMessage string) (string, error)
 
 // ScorerForMetricFn scores one metric given input, output, example, metric definition, and parameters.
 // Returns MetricResult with score in [0,1], optional message and error.
-type ScorerForMetricFn func(input, output interface{}, example Example, metric Metric, params map[string]interface{}) (MetricResult, error)
+type ScorerForMetricFn func(input, output any, example Example, metric Metric, params map[string]any) (MetricResult, error)
 
 var (
 	//go:embed templates/llm_as_judge_default.txt
@@ -41,8 +41,8 @@ var (
 // Clamps score to [0, 1].
 func ParseLLMResponse(content string) (MetricResult, error) {
 	var raw struct {
-		Score   interface{} `json:"score"`
-		Message string      `json:"message"`
+		Score   any    `json:"score"`
+		Message string `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
 		return MetricResult{}, fmt.Errorf("could not parse LLM response: %w", err)
@@ -94,7 +94,7 @@ func GetModelFromServer(ctx context.Context, modelId, serverUrl, apiKey string) 
 
 // callOpenAI calls the OpenAI chat completions API. Returns raw content string.
 func callOpenAI(systemPrompt, userMessage, apiKey string) (string, error) {
-	body := map[string]interface{}{
+	body := map[string]any{
 		"model": "gpt-4o-mini",
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
@@ -144,7 +144,7 @@ func callOpenAI(systemPrompt, userMessage, apiKey string) (string, error) {
 
 // callAnthropic calls the Anthropic messages API. Returns raw content string.
 func callAnthropic(systemPrompt, userMessage, apiKey string) (string, error) {
-	body := map[string]interface{}{
+	body := map[string]any{
 		"model":       "claude-3-5-sonnet-20241022",
 		"max_tokens":  1024,
 		"temperature": 0,
@@ -217,7 +217,7 @@ func CallLLMFallback(systemPrompt, userMessage string, apiKey string, provider s
 
 // ScoreLLMMetricLocal scores one LLM-as-judge metric: builds prompts from metric, calls LLM, parses response.
 func ScoreLLMMetricLocal(
-	input, output interface{},
+	input, output any,
 	example Example,
 	metric Metric,
 	llmCallFn LLMCallFn,
@@ -254,11 +254,11 @@ func ScoreLLMMetricLocal(
 	return result, nil
 }
 
-func toJSONOrString(v interface{}) string {
+func toJSONOrString(v any) string {
 	if v == nil {
 		return ""
 	}
-	if m, ok := v.(map[string]interface{}); ok {
+	if m, ok := v.(map[string]any); ok {
 		b, _ := json.Marshal(m)
 		return string(b)
 	}

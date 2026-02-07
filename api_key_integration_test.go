@@ -52,7 +52,7 @@ func getAPIKeyIDFromList(ctx context.Context) string {
 		return ""
 	}
 
-	var apiKeys []map[string]interface{}
+	var apiKeys []map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&apiKeys); err != nil {
 		return ""
 	}
@@ -154,4 +154,3 @@ func TestIntegration_GetAPIKeyInfo(t *testing.T) {
 		t.Errorf("API key role should be valid, got %s", role)
 	}
 }
-

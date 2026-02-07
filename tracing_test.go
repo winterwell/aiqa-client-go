@@ -231,7 +231,7 @@ func TestTraceIDSampler(t *testing.T) {
 func TestIsJWTToken(t *testing.T) {
 	tests := []struct {
 		name  string
-		value interface{}
+		value any
 		want  bool
 	}{
 		{"Valid JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", true},
@@ -254,7 +254,7 @@ func TestIsJWTToken(t *testing.T) {
 func TestIsAPIKey(t *testing.T) {
 	tests := []struct {
 		name  string
-		value interface{}
+		value any
 		want  bool
 	}{
 		{"OpenAI key", "sk-1234567890abcdef", true},
@@ -279,8 +279,8 @@ func TestApplyDataFilters(t *testing.T) {
 		name       string
 		filtersEnv string
 		key        string
-		value      interface{}
-		want       interface{}
+		value      any
+		want       any
 	}{
 		{
 			name:       "RemovePasswords filter",
@@ -345,16 +345,16 @@ func TestFilterDataRecursive(t *testing.T) {
 	os.Setenv("AIQA_DATA_FILTERS", "RemovePasswords,RemoveJWT")
 
 	// Test nested map
-	data := map[string]interface{}{
+	data := map[string]any{
 		"user":     "john",
 		"password": "secret",
 		"token":    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgI",
-		"nested": map[string]interface{}{
+		"nested": map[string]any{
 			"password": "nested-secret",
 		},
 	}
 
-	result := filterDataRecursive(data).(map[string]interface{})
+	result := filterDataRecursive(data).(map[string]any)
 	if result["password"] != "****" {
 		t.Errorf("Expected password to be filtered, got %v", result["password"])
 	}
@@ -365,7 +365,7 @@ func TestFilterDataRecursive(t *testing.T) {
 		t.Errorf("Expected user to remain unchanged, got %v", result["user"])
 	}
 
-	nested := result["nested"].(map[string]interface{})
+	nested := result["nested"].(map[string]any)
 	if nested["password"] != "****" {
 		t.Errorf("Expected nested password to be filtered, got %v", nested["password"])
 	}
@@ -384,13 +384,13 @@ func TestSerializeValue(t *testing.T) {
 
 	os.Setenv("AIQA_DATA_FILTERS", "RemovePasswords")
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"username": "john",
 		"password": "secret",
 	}
 
 	result := serializeValue(data)
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
 		t.Fatalf("Failed to unmarshal serialized value: %v", err)
 	}

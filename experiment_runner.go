@@ -44,32 +44,32 @@ type Example struct {
 	Name string `json:"name,omitempty"`
 	// The source trace, if created from spans. Do not edit this - it is set by the server.
 	// For the trace relating to running an example, see Result.Trace.
-	Trace        string                 `json:"trace,omitempty"`
-	Dataset      string                 `json:"dataset"`
-	Organisation string                 `json:"organisation"`
-	Spans        []interface{}          `json:"spans,omitempty"`
-	Input        interface{}            `json:"input,omitempty"`
-	Outputs      map[string]interface{} `json:"outputs"`
-	Created      time.Time              `json:"created"`
-	Updated      time.Time              `json:"updated"`
-	Metrics      []Metric               `json:"metrics,omitempty"`
-	Tags         []string               `json:"tags,omitempty"`
+	Trace        string         `json:"trace,omitempty"`
+	Dataset      string         `json:"dataset"`
+	Organisation string         `json:"organisation"`
+	Spans        []any          `json:"spans,omitempty"`
+	Input        any            `json:"input,omitempty"`
+	Outputs      map[string]any `json:"outputs"`
+	Created      time.Time      `json:"created"`
+	Updated      time.Time      `json:"updated"`
+	Metrics      []Metric       `json:"metrics,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
 }
 
 // Metric represents a metric for scoring
 type Metric struct {
-	Id             string                 `json:"id,omitempty"`
-	Name           string                 `json:"name"`
-	Description    string                 `json:"description,omitempty"`
-	Unit           string                 `json:"unit,omitempty"`
-	Type           string                 `json:"type"` // "javascript", "llm", or "number"
-	Parameters     map[string]interface{} `json:"parameters,omitempty"`
-	Prompt         string                 `json:"prompt,omitempty"`
-	PromptCriteria string                 `json:"promptCriteria,omitempty"`
-	Code           string                 `json:"code,omitempty"`
-	Model          string                 `json:"model,omitempty"`
-	Provider       string                 `json:"provider,omitempty"`
-	Value          interface{}            `json:"value,omitempty"`
+	Id             string         `json:"id,omitempty"`
+	Name           string         `json:"name"`
+	Description    string         `json:"description,omitempty"`
+	Unit           string         `json:"unit,omitempty"`
+	Type           string         `json:"type"` // "javascript", "llm", or "number"
+	Parameters     map[string]any `json:"parameters,omitempty"`
+	Prompt         string         `json:"prompt,omitempty"`
+	PromptCriteria string         `json:"promptCriteria,omitempty"`
+	Code           string         `json:"code,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	Provider       string         `json:"provider,omitempty"`
+	Value          any            `json:"value,omitempty"`
 }
 
 // Dataset represents a dataset
@@ -86,15 +86,15 @@ type Dataset struct {
 
 // Experiment represents an experiment
 type Experiment struct {
-	Id           string                 `json:"id"`
-	Dataset      string                 `json:"dataset"`
-	Organisation string                 `json:"organisation"`
-	Name         string                 `json:"name,omitempty"`
-	Parameters   map[string]interface{} `json:"parameters,omitempty"`
-	Summaries    map[string]interface{} `json:"summaries,omitempty"`
-	Created      time.Time              `json:"created"`
-	Updated      time.Time              `json:"updated"`
-	Results      []Result               `json:"results,omitempty"`
+	Id           string         `json:"id"`
+	Dataset      string         `json:"dataset"`
+	Organisation string         `json:"organisation"`
+	Name         string         `json:"name,omitempty"`
+	Parameters   map[string]any `json:"parameters,omitempty"`
+	Summaries    map[string]any `json:"summaries,omitempty"`
+	Created      time.Time      `json:"created"`
+	Updated      time.Time      `json:"updated"`
+	Results      []Result       `json:"results,omitempty"`
 }
 
 // Result represents the result for an example. See Experiment.ts Result interface.
@@ -137,6 +137,18 @@ type ExperimentRunner struct {
 	summaryResults    map[string]MetricStats
 }
 
+// CallMyCode is how the experiment runner calls the engine function,
+// paasing in the input from an Example, plus any parameters for the experiment.
+// Error handling:
+//   - Results are not recorded if the error is not nil.
+//   - If the error is an instance of ErrStopExperiment, or if the error begins
+//     with ERROR_PREFIX_STOP_EXPERIMENT, then the experiment runner will stop the experiment.
+type CallMyCodeFunc func(
+	ctx context.Context,
+	input any,
+	parameters map[string]any,
+) (any, error)
+
 // NewExperimentRunner creates a new ExperimentRunner
 func NewExperimentRunner(options ExperimentRunnerOptions) *ExperimentRunner {
 	serverUrl := options.ServerUrl
@@ -167,7 +179,7 @@ func NewExperimentRunner(options ExperimentRunnerOptions) *ExperimentRunner {
 }
 
 // setEnvFromMap sets os env vars from the given map (truthy values only). Returns a restore func to call when done.
-func setEnvFromMap(m map[string]interface{}) func() {
+func setEnvFromMap(m map[string]any) func() {
 	saved := make(map[string]string)
 	for k, v := range m {
 		if v == nil {
@@ -342,7 +354,7 @@ func (er *ExperimentRunner) CreateExperiment(ctx context.Context, experimentSetu
 		experimentSetup.Results = []Result{}
 	}
 	if experimentSetup.Summaries == nil {
-		experimentSetup.Summaries = make(map[string]interface{})
+		experimentSetup.Summaries = make(map[string]any)
 	}
 
 	fmt.Println("AIQA: Creating experiment")
@@ -363,7 +375,7 @@ func (er *ExperimentRunner) CreateExperiment(ctx context.Context, experimentSetu
 }
 
 // ScoreAndStore asks the server to score an example result. Stores the score for later summary calculation.
-func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, result *Result, output interface{}, scores map[string]float64) (*Result, error) {
+func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, result *Result, output any, scores map[string]float64) (*Result, error) {
 	// Do we have an experiment ID? If not, we need to create the experiment first
 	if er.experimentId == "" {
 		if _, err := er.CreateExperiment(ctx, nil); err != nil {
@@ -381,7 +393,7 @@ func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, result *Result, o
 
 	fmt.Printf("AIQA: Scoring and storing example: %s\n", result.Example)
 	fmt.Printf("AIQA: Scores: %v\n", scores)
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"output": output,
 		"trace":  result.Trace,
 		"scores": scores,
@@ -408,12 +420,12 @@ func (er *ExperimentRunner) ScoreAndStore(ctx context.Context, result *Result, o
 // Run runs an engine function on all examples and scores the results
 // engine: function that takes context, input and parameters and returns output
 // Checks if results already exist for an example before calling RunExample, allowing experiments to be resumed.
-func (er *ExperimentRunner) Run(ctx context.Context, engine func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error)) (int, error) {
+func (er *ExperimentRunner) Run(ctx context.Context, engine func(ctx context.Context, input any, parameters map[string]any) (any, error)) (int, error) {
 	return er.RunSomeExamples(ctx, engine, "", 0)
 }
 
 // RunSomeExamples runs an engine function on all or some of the examples and scores the results
-func (er *ExperimentRunner) RunSomeExamples(ctx context.Context, engine func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error), tag string, limit int) (int, error) {
+func (er *ExperimentRunner) RunSomeExamples(ctx context.Context, engine func(ctx context.Context, input any, parameters map[string]any) (any, error), tag string, limit int) (int, error) {
 	// Ensure experiment is loaded
 	if er.experiment == nil {
 		if er.experimentId != "" {
@@ -493,7 +505,7 @@ func (er *ExperimentRunner) getLLMCallFn(model string) LLMCallFn {
 	return nil
 }
 
-func (er *ExperimentRunner) scoreLLMMetric(ctx context.Context, input, output interface{}, example Example, metric Metric) (MetricResult, error) {
+func (er *ExperimentRunner) scoreLLMMetric(ctx context.Context, input, output any, example Example, metric Metric) (MetricResult, error) {
 	llmCallFn := er.getLLMCallFn(metric.Model)
 	if llmCallFn != nil {
 		return ScoreLLMMetricLocal(input, output, example, metric, llmCallFn)
@@ -508,7 +520,7 @@ func (er *ExperimentRunner) scoreLLMMetric(ctx context.Context, input, output in
 // callMyCode receives a context.Context as the first parameter, which can be used to propagate trace context in HTTP calls.
 func (er *ExperimentRunner) RunExample(ctx context.Context,
 	example Example,
-	callMyCode func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error),
+	callMyCode CallMyCodeFunc,
 ) (*Result, error) {
 	fmt.Printf("AIQA: RunExample %s\n", example.Id)
 	if er.experiment == nil {
@@ -524,12 +536,12 @@ func (er *ExperimentRunner) RunExample(ctx context.Context,
 
 	parametersHere := er.experiment.Parameters
 	if parametersHere == nil {
-		parametersHere = make(map[string]interface{})
+		parametersHere = make(map[string]any)
 	}
 	input := example.Input
 	if input == nil && len(example.Spans) > 0 {
-		if spanMap, ok := example.Spans[0].(map[string]interface{}); ok {
-			if attributes, ok := spanMap["attributes"].(map[string]interface{}); ok {
+		if spanMap, ok := example.Spans[0].(map[string]any); ok {
+			if attributes, ok := spanMap["attributes"].(map[string]any); ok {
 				input = attributes["input"]
 			}
 		}
@@ -550,15 +562,15 @@ func (er *ExperimentRunner) RunExample(ctx context.Context,
 func (er *ExperimentRunner) runExampleWithParameters(
 	runnerCtx context.Context,
 	example Example,
-	input interface{},
-	callMyCode func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error),
-	parameters map[string]interface{},
+	input any,
+	callMyCode CallMyCodeFunc,
+	parameters map[string]any,
 ) (*Result, error) {
 	parametersFixed := er.experiment.Parameters
 	if parametersFixed == nil {
-		parametersFixed = make(map[string]interface{})
+		parametersFixed = make(map[string]any)
 	}
-	parametersHere := make(map[string]interface{})
+	parametersHere := make(map[string]any)
 	for k, v := range parametersFixed {
 		parametersHere[k] = v
 	}
@@ -578,7 +590,7 @@ func (er *ExperimentRunner) runExampleWithParameters(
 		runExampleCtx, runExampleSpan = tracer.Start(context.Background(), "RunExample")
 		defer runExampleSpan.End()
 		setComponentTagIfSet(runExampleSpan)
-		inputDict := map[string]interface{}{
+		inputDict := map[string]any{
 			"example.id": example.Id,
 			"input":      input,
 		}
@@ -605,6 +617,7 @@ func (er *ExperimentRunner) runExampleWithParameters(
 	// process the output into scores
 	duration := time.Since(start)
 	if err != nil {
+		// Errors do get traced - but are not saved as experiment results
 		if runExampleSpan != nil {
 			runExampleSpan.RecordError(err)
 			runExampleSpan.SetStatus(codes.Error, err.Error())
@@ -664,7 +677,7 @@ func (er *ExperimentRunner) runExampleWithParameters(
 }
 
 // Run local scoring functions (the server might run more later, depending on where LLM keys are setup)
-func (er *ExperimentRunner) scoreExampleOutputLocal(ctx context.Context, example Example, input interface{}, output interface{}, parameters map[string]interface{}) (map[string]float64, error) {
+func (er *ExperimentRunner) scoreExampleOutputLocal(ctx context.Context, example Example, input any, output any, parameters map[string]any) (map[string]float64, error) {
 	scores := make(map[string]float64)
 	// metrics are from dataset + example (which could be unset)
 	dataset, err := er.GetDataset(ctx)
@@ -758,7 +771,7 @@ func (er *ExperimentRunner) GetSummaryResults(ctx context.Context) (map[string]M
 	summaryResults := make(map[string]MetricStats)
 	if experiment.Summaries != nil {
 		for key, value := range experiment.Summaries {
-			if statsMap, ok := value.(map[string]interface{}); ok {
+			if statsMap, ok := value.(map[string]any); ok {
 				stats := MetricStats{}
 				if mean, ok := statsMap["mean"].(float64); ok {
 					stats.Mean = mean

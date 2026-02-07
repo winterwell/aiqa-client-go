@@ -312,13 +312,13 @@ if err != nil {
 }
 
 // Define your engine function
-engine := func(input interface{}, parameters map[string]interface{}) (interface{}, error) {
+engine := func(input any, parameters map[string]any) (any, error) {
     // Your AI logic here
     return "output", nil
 }
 
 // Optional: define a scorer function
-scorer := func(output interface{}, example aiqa.Example, parameters map[string]interface{}) (map[string]float64, error) {
+scorer := func(output any, example aiqa.Example, parameters map[string]any) (map[string]float64, error) {
     scores := make(map[string]float64)
     // Calculate scores based on output and example
     scores["accuracy"] = 0.95

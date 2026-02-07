@@ -108,7 +108,7 @@ func TestSanitizeStringForUTF8(t *testing.T) {
 func TestObjectSerialiserIsJWTToken(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected bool
 	}{
 		{"valid JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", true},
@@ -134,7 +134,7 @@ func TestObjectSerialiserIsJWTToken(t *testing.T) {
 func TestObjectSerialiserIsAPIKey(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected bool
 	}{
 		{"OpenAI key", "sk-1234567890abcdef", true},
@@ -178,8 +178,8 @@ func TestObjectSerialiserApplyDataFilters(t *testing.T) {
 	tests := []struct {
 		name     string
 		key      string
-		value    interface{}
-		expected interface{}
+		value    any
+		expected any
 	}{
 		{"password field", "password", "secret123", "****"},
 		{"password in key", "user_password", "secret123", "****"},
@@ -249,27 +249,27 @@ func TestSafeStrRepr(t *testing.T) {
 func TestSerializeForSpan(t *testing.T) {
 	tests := []struct {
 		name  string
-		input interface{}
-		check func(interface{}) bool
+		input any
+		check func(any) bool
 	}{
-		{"nil", nil, func(v interface{}) bool { return v == nil }},
-		{"string", "hello", func(v interface{}) bool { return v == "hello" }},
-		{"int", 42, func(v interface{}) bool { return v == 42 }},
-		{"float64", 3.14, func(v interface{}) bool { return v == 3.14 }},
-		{"bool", true, func(v interface{}) bool { return v == true }},
-		{"bytes", []byte("hello"), func(v interface{}) bool {
+		{"nil", nil, func(v any) bool { return v == nil }},
+		{"string", "hello", func(v any) bool { return v == "hello" }},
+		{"int", 42, func(v any) bool { return v == 42 }},
+		{"float64", 3.14, func(v any) bool { return v == 3.14 }},
+		{"bool", true, func(v any) bool { return v == true }},
+		{"bytes", []byte("hello"), func(v any) bool {
 			b, ok := v.([]byte)
 			return ok && string(b) == "hello"
 		}},
-		{"list of primitives", []interface{}{1, 2, 3}, func(v interface{}) bool {
-			list, ok := v.([]interface{})
+		{"list of primitives", []any{1, 2, 3}, func(v any) bool {
+			list, ok := v.([]any)
 			return ok && len(list) == 3
 		}},
-		{"list with complex", []interface{}{1, map[string]interface{}{"key": "value"}}, func(v interface{}) bool {
+		{"list with complex", []any{1, map[string]any{"key": "value"}}, func(v any) bool {
 			str, ok := v.(string)
 			return ok && strings.Contains(str, "key")
 		}},
-		{"map", map[string]interface{}{"key": "value"}, func(v interface{}) bool {
+		{"map", map[string]any{"key": "value"}, func(v any) bool {
 			str, ok := v.(string)
 			return ok && strings.Contains(str, "key")
 		}},
@@ -297,8 +297,8 @@ func TestObjectSerialiserSerializeValue(t *testing.T) {
 	}()
 
 	// Test simple value
-	result := SerializeValue(map[string]interface{}{"key": "value"})
-	var decoded map[string]interface{}
+	result := SerializeValue(map[string]any{"key": "value"})
+	var decoded map[string]any
 	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
 		t.Errorf("Expected valid JSON, got error: %v", err)
 	}
@@ -308,14 +308,14 @@ func TestObjectSerialiserSerializeValue(t *testing.T) {
 
 	// Test with filters
 	os.Setenv("AIQA_DATA_FILTERS", "RemovePasswords")
-	result = SerializeValue(map[string]interface{}{"password": "secret"})
+	result = SerializeValue(map[string]any{"password": "secret"})
 	if !strings.Contains(result, "****") {
 		t.Errorf("Expected password to be filtered, got %q", result)
 	}
 
 	// Test nested structures
-	nested := map[string]interface{}{
-		"user": map[string]interface{}{
+	nested := map[string]any{
+		"user": map[string]any{
 			"name":     "John",
 			"password": "secret",
 		},
@@ -341,22 +341,22 @@ func TestObjectSerialiserFilterDataRecursive(t *testing.T) {
 	os.Setenv("AIQA_DATA_FILTERS", "RemovePasswords")
 
 	// Test nested map
-	input := map[string]interface{}{
-		"user": map[string]interface{}{
+	input := map[string]any{
+		"user": map[string]any{
 			"name":     "John",
 			"password": "secret",
 		},
 		"password": "top_secret",
 	}
 	result := filterDataRecursive(input)
-	resultMap, ok := result.(map[string]interface{})
+	resultMap, ok := result.(map[string]any)
 	if !ok {
 		t.Fatalf("Expected map, got %T", result)
 	}
 	if resultMap["password"] != "****" {
 		t.Errorf("Expected top-level password to be filtered, got %v", resultMap["password"])
 	}
-	userMap, ok := resultMap["user"].(map[string]interface{})
+	userMap, ok := resultMap["user"].(map[string]any)
 	if !ok {
 		t.Fatalf("Expected nested map, got %T", resultMap["user"])
 	}
@@ -368,12 +368,12 @@ func TestObjectSerialiserFilterDataRecursive(t *testing.T) {
 	}
 
 	// Test list
-	inputList := []interface{}{
-		map[string]interface{}{"password": "secret1"},
-		map[string]interface{}{"password": "secret2"},
+	inputList := []any{
+		map[string]any{"password": "secret1"},
+		map[string]any{"password": "secret2"},
 	}
 	resultList := filterDataRecursive(inputList)
-	list, ok := resultList.([]interface{})
+	list, ok := resultList.([]any)
 	if !ok {
 		t.Fatalf("Expected list, got %T", resultList)
 	}
@@ -423,11 +423,11 @@ func TestGetEnabledFilters(t *testing.T) {
 
 func TestSerializeForSpanWithComplexTypes(t *testing.T) {
 	// Test struct-like behavior (maps)
-	complexMap := map[string]interface{}{
-		"nested": map[string]interface{}{
+	complexMap := map[string]any{
+		"nested": map[string]any{
 			"value": 42,
 		},
-		"list": []interface{}{1, 2, 3},
+		"list": []any{1, 2, 3},
 	}
 	result := SerializeForSpan(complexMap)
 	str, ok := result.(string)
@@ -439,7 +439,7 @@ func TestSerializeForSpanWithComplexTypes(t *testing.T) {
 	}
 
 	// Test that it's valid JSON
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal([]byte(str), &decoded); err != nil {
 		t.Errorf("Expected valid JSON, got error: %v", err)
 	}
@@ -448,12 +448,12 @@ func TestSerializeForSpanWithComplexTypes(t *testing.T) {
 func TestSerializeValueWithTime(t *testing.T) {
 	// Test that time values are handled
 	now := time.Now()
-	result := SerializeValue(map[string]interface{}{
+	result := SerializeValue(map[string]any{
 		"timestamp": now,
 		"value":     42,
 	})
 	// Should be valid JSON
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
 		t.Errorf("Expected valid JSON with time, got error: %v", err)
 	}

@@ -118,8 +118,8 @@ type TracingOptions struct {
 	Name         string
 	IgnoreInput  []string
 	IgnoreOutput []string
-	FilterInput  func(interface{}) interface{}
-	FilterOutput func(interface{}) interface{}
+	FilterInput  func(any) any
+	FilterOutput func(any) any
 }
 
 // GetAIQAClient initializes and returns the AIQA client singleton.
@@ -474,12 +474,12 @@ func ShutdownTracing(ctx context.Context) error {
 // serializeValue serializes a value to JSON string for span attributes
 // Filter functions (getEnabledFilters, applyDataFilters, filterDataRecursive, etc.) are now in object_serialiser.go
 // This is kept for backward compatibility but delegates to the new implementation
-func serializeValue(value interface{}) string {
+func serializeValue(value any) string {
 	return SerializeValue(value)
 }
 
 // SetSpanAttribute sets an attribute on the active span
-func SetSpanAttribute(ctx context.Context, attributeName string, attributeValue interface{}) bool {
+func SetSpanAttribute(ctx context.Context, attributeName string, attributeValue any) bool {
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return false
@@ -539,7 +539,7 @@ func SetConversationId(ctx context.Context, conversationId string) bool {
 // totalTokens: Total number of tokens used (maps to gen_ai.usage.total_tokens)
 // cachedInputTokens: Number of cached input tokens used (maps to gen_ai.usage.cached_input_tokens)
 // Returns: True if at least one token usage attribute was set, False if no active span found
-func SetTokenUsage(ctx context.Context, inputTokens interface{}, outputTokens interface{}, totalTokens interface{}, cachedInputTokens interface{}) bool {
+func SetTokenUsage(ctx context.Context, inputTokens any, outputTokens any, totalTokens any, cachedInputTokens any) bool {
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return false
@@ -573,7 +573,7 @@ func SetTokenUsage(ctx context.Context, inputTokens interface{}, outputTokens in
 	return setCount > 0
 }
 
-func normalizeTokenCount(value interface{}) *int {
+func normalizeTokenCount(value any) *int {
 	if value == nil {
 		return nil
 	}
@@ -819,7 +819,7 @@ type FeedbackOptions struct {
 //	if span != nil {
 //	    log.Printf("Found span: %v", span["name"])
 //	}
-func GetSpan(ctx context.Context, spanId string, organisationId string) (map[string]interface{}, error) {
+func GetSpan(ctx context.Context, spanId string, organisationId string) (map[string]any, error) {
 	serverURL := GetServerURL("")
 	apiKey := GetAPIKey("")
 	orgID := organisationId
@@ -847,8 +847,8 @@ func GetSpan(ctx context.Context, spanId string, organisationId string) (map[str
 		return nil, fmt.Errorf("failed to get span: %d %s - %s", resp.StatusCode, resp.Status, string(body))
 	}
 	var result struct {
-		Hits  []map[string]interface{} `json:"hits"`
-		Total int                      `json:"total"`
+		Hits  []map[string]any `json:"hits"`
+		Total int              `json:"total"`
 	}
 	if err := parseJSONResponse(resp, &result); err != nil {
 		return nil, err

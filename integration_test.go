@@ -29,8 +29,8 @@ func getTestMarker() string {
 
 // querySpansResponse represents the response from querying spans
 type querySpansResponse struct {
-	Hits  []map[string]interface{} `json:"hits"`
-	Total int                      `json:"total"`
+	Hits  []map[string]any `json:"hits"`
+	Total int              `json:"total"`
 }
 
 // querySpans queries spans from the server API
@@ -75,7 +75,7 @@ func querySpans(ctx context.Context, query string, limit int) (*querySpansRespon
 }
 
 // waitForSpans waits for spans to appear in the server, with retry logic
-func waitForSpans(ctx context.Context, query string, expectedCount int, maxWaitSeconds int, pollInterval time.Duration) ([]map[string]interface{}, error) {
+func waitForSpans(ctx context.Context, query string, expectedCount int, maxWaitSeconds int, pollInterval time.Duration) ([]map[string]any, error) {
 	startTime := time.Now()
 	for time.Since(startTime) < time.Duration(maxWaitSeconds)*time.Second {
 		result, err := querySpans(ctx, query, 100)
@@ -197,7 +197,7 @@ func TestIntegration_BasicSpanGenerationAndRetrieval(t *testing.T) {
 	}
 
 	// Check status code (1 = OK)
-	if status, ok := span["status"].(map[string]interface{}); ok {
+	if status, ok := span["status"].(map[string]any); ok {
 		if code, ok := status["code"].(float64); ok {
 			if int(code) != 1 {
 				t.Errorf("Expected status code 1 (OK), got %d", int(code))
@@ -317,19 +317,19 @@ func TestIntegration_SpanWithAttributes(t *testing.T) {
 	defer cleanup()
 
 	// Create a function that will have input/output attributes
-	functionWithAttrs := func(data map[string]interface{}) map[string]interface{} {
+	functionWithAttrs := func(data map[string]any) map[string]any {
 		value, _ := data["value"].(float64)
-		return map[string]interface{}{
+		return map[string]any{
 			"result":    value * 2,
 			"processed": true,
 		}
 	}
 	tracedFunction := WithTracing(functionWithAttrs, TracingOptions{
 		Name: fmt.Sprintf("test_attrs_%s", testMarker),
-	}).(func(map[string]interface{}) map[string]interface{})
+	}).(func(map[string]any) map[string]any)
 
 	// Call with specific input
-	inputData := map[string]interface{}{
+	inputData := map[string]any{
 		"value":       42.0,
 		"test_marker": testMarker,
 	}
@@ -362,13 +362,13 @@ func TestIntegration_SpanWithAttributes(t *testing.T) {
 	}
 
 	// Verify attributes are present (they may be in attributes or unindexed_attributes)
-	attributes := make(map[string]interface{})
-	if attrs, ok := span["attributes"].(map[string]interface{}); ok {
+	attributes := make(map[string]any)
+	if attrs, ok := span["attributes"].(map[string]any); ok {
 		for k, v := range attrs {
 			attributes[k] = v
 		}
 	}
-	if unindexedAttrs, ok := span["unindexed_attributes"].(map[string]interface{}); ok {
+	if unindexedAttrs, ok := span["unindexed_attributes"].(map[string]any); ok {
 		for k, v := range unindexedAttrs {
 			attributes[k] = v
 		}
@@ -439,7 +439,7 @@ func TestIntegration_SpanStatusCode(t *testing.T) {
 	}
 
 	// Find the spans
-	var successSpan, errorSpan map[string]interface{}
+	var successSpan, errorSpan map[string]any
 	for _, hit := range hits {
 		if name, ok := hit["name"].(string); ok {
 			if name == fmt.Sprintf("test_success_%s", testMarker) {
@@ -458,7 +458,7 @@ func TestIntegration_SpanStatusCode(t *testing.T) {
 	}
 
 	// Verify status codes
-	if status, ok := successSpan["status"].(map[string]interface{}); ok {
+	if status, ok := successSpan["status"].(map[string]any); ok {
 		if code, ok := status["code"].(float64); ok {
 			if int(code) != 1 {
 				t.Errorf("Success span should have OK status (1), got %d", int(code))
@@ -466,7 +466,7 @@ func TestIntegration_SpanStatusCode(t *testing.T) {
 		}
 	}
 
-	if status, ok := errorSpan["status"].(map[string]interface{}); ok {
+	if status, ok := errorSpan["status"].(map[string]any); ok {
 		if code, ok := status["code"].(float64); ok {
 			if int(code) != 2 {
 				t.Errorf("Error span should have ERROR status (2), got %d", int(code))

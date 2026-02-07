@@ -155,7 +155,7 @@ func TestExperimentRunner_RunExample(t *testing.T) {
 		Input: "test-input",
 	}
 
-	engine := func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error) {
+	engine := func(ctx context.Context, input any, parameters map[string]any) (any, error) {
 		return "test-output", nil
 	}
 
@@ -178,7 +178,7 @@ func TestExperimentRunner_RunExample_ErrStopEarly(t *testing.T) {
 		Input: "test-input",
 	}
 
-	engine := func(ctx context.Context, input interface{}, parameters map[string]interface{}) (interface{}, error) {
+	engine := func(ctx context.Context, input any, parameters map[string]any) (any, error) {
 		return nil, ErrStopExperiment
 	}
 
@@ -212,7 +212,7 @@ func TestExampleStruct(t *testing.T) {
 		Trace:   "test-trace",
 		Dataset: "test-dataset",
 		Input:   "test-input",
-		Outputs: map[string]interface{}{
+		Outputs: map[string]any{
 			"output1": "value1",
 		},
 	}
@@ -231,7 +231,7 @@ func TestMetricStruct(t *testing.T) {
 		Description: "test description",
 		Unit:        "score",
 		Type:        "javascript",
-		Parameters: map[string]interface{}{
+		Parameters: map[string]any{
 			"param1": "value1",
 		},
 	}
@@ -270,7 +270,7 @@ func TestExperimentStruct(t *testing.T) {
 		Dataset:      "test-dataset",
 		Organisation: "test-org",
 		Name:         "Test Experiment",
-		Parameters: map[string]interface{}{
+		Parameters: map[string]any{
 			"param1": "value1",
 		},
 		Results: []Result{

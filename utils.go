@@ -148,7 +148,7 @@ var defaultHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // makeRequest performs an HTTP request with common error handling
 // Note: net/http automatically handles gzip/deflate decompression when Accept-Encoding header is set
-func makeRequest(ctx context.Context, method, url string, body interface{}, apiKey string) (*http.Response, error) {
+func makeRequest(ctx context.Context, method, url string, body any, apiKey string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -189,7 +189,7 @@ func makeRequest(ctx context.Context, method, url string, body interface{}, apiK
 
 // parseJSONResponse parses a JSON response body into the provided struct.
 // When decode fails, set AIQA_DEBUG=1 to log response headers and body preview (non-printables as \xNN).
-func parseJSONResponse(resp *http.Response, result interface{}) error {
+func parseJSONResponse(resp *http.Response, result any) error {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -234,7 +234,7 @@ func FormatHTTPError(resp *http.Response, operation string) string {
 }
 
 // GetOrganisation gets organisation information based on API key via an API call
-func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiKey string) (map[string]interface{}, error) {
+func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiKey string) (map[string]any, error) {
 	url := GetServerURL(serverURL)
 	key := GetAPIKey(apiKey)
 
@@ -249,7 +249,7 @@ func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiK
 		return nil, fmt.Errorf("%s", FormatHTTPError(resp, "get organisation"))
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode organisation response: %w", err)
 	}
@@ -258,7 +258,7 @@ func GetOrganisation(ctx context.Context, organisationID string, serverURL, apiK
 }
 
 // GetAPIKeyInfo gets API key information via an API call
-func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey string) (map[string]interface{}, error) {
+func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey string) (map[string]any, error) {
 	url := GetServerURL(serverURL)
 	key := GetAPIKey(apiKey)
 
@@ -273,7 +273,7 @@ func GetAPIKeyInfo(ctx context.Context, apiKeyID string, serverURL, apiKey strin
 		return nil, fmt.Errorf("%s", FormatHTTPError(resp, "get api key info"))
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode api key info response: %w", err)
 	}

@@ -265,7 +265,7 @@ Example with httptest:
 func TestWithMockServer(t *testing.T) {
     server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
-        json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+        json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
     }))
     defer server.Close()
 
