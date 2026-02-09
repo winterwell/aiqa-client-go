@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/winterwell/aiqa-client-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Example usage of aiqa-client-go
@@ -35,7 +38,15 @@ func main() {
 	multiply := func(x, y int) int {
 		return x * y
 	}
-	tracedMultiply := aiqa.WithTracing(multiply).(func(int, int) int)
+	tracedMultiply := func(x, y int) int {
+		_, span := otel.Tracer(aiqa.AIQATracerName).Start(context.Background(), "multiply")
+		span.SetAttributes(attribute.String("input", fmt.Sprintf(`{"x":%d,"y":%d}`, x, y)))
+		result := multiply(x, y)
+		span.SetAttributes(attribute.String("output", fmt.Sprintf("%d", result)))
+		span.SetStatus(codes.Ok, "")
+		span.End()
+		return result
+	}
 	result := tracedMultiply(5, 3)
 	fmt.Printf("Result: %d\n", result)
 
@@ -46,7 +57,21 @@ func main() {
 		}
 		return x / y, nil
 	}
-	tracedDivide := aiqa.WithTracing(divide).(func(float64, float64) (float64, error))
+	tracedDivide := func(x, y float64) (float64, error) {
+		_, span := otel.Tracer(aiqa.AIQATracerName).Start(context.Background(), "divide")
+		span.SetAttributes(attribute.String("input", fmt.Sprintf(`{"x":%g,"y":%g}`, x, y)))
+		result, err := divide(x, y)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			return 0, err
+		}
+		span.SetAttributes(attribute.String("output", fmt.Sprintf("%g", result)))
+		span.SetStatus(codes.Ok, "")
+		span.End()
+		return result, nil
+	}
 	result2, err := tracedDivide(10, 2)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -60,7 +85,21 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 		return fmt.Sprintf("Processed: %s", data), nil
 	}
-	tracedProcess := aiqa.WithTracing(processData).(func(context.Context, string) (string, error))
+	tracedProcess := func(ctx context.Context, data string) (string, error) {
+		ctx, span := otel.Tracer(aiqa.AIQATracerName).Start(ctx, "processData")
+		span.SetAttributes(attribute.String("input", data))
+		result, err := processData(ctx, data)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			return "", err
+		}
+		span.SetAttributes(attribute.String("output", result))
+		span.SetStatus(codes.Ok, "")
+		span.End()
+		return result, nil
+	}
 	result3, err := tracedProcess(context.Background(), "test data")
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -72,7 +111,14 @@ func main() {
 	outer := func(x int) int {
 		return tracedMultiply(x, 2)
 	}
-	tracedOuter := aiqa.WithTracing(outer).(func(int) int)
+	tracedOuter := func(x int) int {
+		_, span := otel.Tracer(aiqa.AIQATracerName).Start(context.Background(), "outer")
+		result := outer(x)
+		span.SetAttributes(attribute.String("output", fmt.Sprintf("%d", result)))
+		span.SetStatus(codes.Ok, "")
+		span.End()
+		return result
+	}
 	result4 := tracedOuter(10)
 	fmt.Printf("Nested result: %d\n", result4)
 

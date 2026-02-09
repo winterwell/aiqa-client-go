@@ -12,6 +12,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 func init() {
@@ -158,16 +161,17 @@ func TestIntegration_BasicSpanGenerationAndRetrieval(t *testing.T) {
 	cleanup := setupTracingTest(t, serverURL, apiKey, 1.0)
 	defer cleanup()
 
-	// Create a traced function with a unique name
-	testFunction := func(x, y int) int {
-		return x + y
+	// Create one span with a unique name
+	spanName := fmt.Sprintf("test_function_%s", testMarker)
+	spanCtx, otelSpan := otel.Tracer(AIQATracerName).Start(context.Background(), spanName)
+	otelSpan.SetAttributes(attribute.String("input", serializeValue(map[string]any{"x": 5, "y": 3})))
+	result := 5 + 3
+	otelSpan.SetAttributes(attribute.String("output", serializeValue(result)))
+	otelSpan.SetStatus(codes.Ok, "")
+	otelSpan.End()
+	if GetTraceId(spanCtx) == "" {
+		t.Error("Expected a valid trace id in span context")
 	}
-	tracedFunction := WithTracing(testFunction, TracingOptions{
-		Name: fmt.Sprintf("test_function_%s", testMarker),
-	}).(func(int, int) int)
-
-	// Call the function to generate a span
-	result := tracedFunction(5, 3)
 	if result != 8 {
 		t.Errorf("Expected result 8, got %d", result)
 	}
@@ -231,35 +235,31 @@ func TestIntegration_MultipleSpansGeneration(t *testing.T) {
 	cleanup := setupTracingTest(t, serverURL, apiKey, 1.0)
 	defer cleanup()
 
-	// Create multiple traced functions
-	funcA := func(x int) int {
-		return x * 2
-	}
-	funcB := func(x int) int {
-		return x + 10
-	}
-	funcC := func(x int) int {
-		return x - 5
-	}
+	spanA := fmt.Sprintf("test_func_a_%s", testMarker)
+	spanB := fmt.Sprintf("test_func_b_%s", testMarker)
+	spanC := fmt.Sprintf("test_func_c_%s", testMarker)
 
-	tracedFuncA := WithTracing(funcA, TracingOptions{
-		Name: fmt.Sprintf("test_func_a_%s", testMarker),
-	}).(func(int) int)
-	tracedFuncB := WithTracing(funcB, TracingOptions{
-		Name: fmt.Sprintf("test_func_b_%s", testMarker),
-	}).(func(int) int)
-	tracedFuncC := WithTracing(funcC, TracingOptions{
-		Name: fmt.Sprintf("test_func_c_%s", testMarker),
-	}).(func(int) int)
+	_, s1 := otel.Tracer(AIQATracerName).Start(context.Background(), spanA)
+	resultA := 5 * 2
+	s1.SetStatus(codes.Ok, "")
+	s1.End()
+	_, s2 := otel.Tracer(AIQATracerName).Start(context.Background(), spanB)
+	resultB := 5 + 10
+	s2.SetStatus(codes.Ok, "")
+	s2.End()
+	_, s3 := otel.Tracer(AIQATracerName).Start(context.Background(), spanC)
+	resultC := 5 - 5
+	s3.SetStatus(codes.Ok, "")
+	s3.End()
 
-	// Call all functions
-	if tracedFuncA(5) != 10 {
+	// Check all functions
+	if resultA != 10 {
 		t.Error("funcA(5) should return 10")
 	}
-	if tracedFuncB(5) != 15 {
+	if resultB != 15 {
 		t.Error("funcB(5) should return 15")
 	}
-	if tracedFuncC(5) != 0 {
+	if resultC != 0 {
 		t.Error("funcC(5) should return 0")
 	}
 
@@ -316,24 +316,21 @@ func TestIntegration_SpanWithAttributes(t *testing.T) {
 	cleanup := setupTracingTest(t, serverURL, apiKey, 1.0)
 	defer cleanup()
 
-	// Create a function that will have input/output attributes
-	functionWithAttrs := func(data map[string]any) map[string]any {
-		value, _ := data["value"].(float64)
-		return map[string]any{
-			"result":    value * 2,
-			"processed": true,
-		}
-	}
-	tracedFunction := WithTracing(functionWithAttrs, TracingOptions{
-		Name: fmt.Sprintf("test_attrs_%s", testMarker),
-	}).(func(map[string]any) map[string]any)
-
-	// Call with specific input
+	spanName := fmt.Sprintf("test_attrs_%s", testMarker)
 	inputData := map[string]any{
 		"value":       42.0,
 		"test_marker": testMarker,
 	}
-	output := tracedFunction(inputData)
+	_, otelSpan := otel.Tracer(AIQATracerName).Start(context.Background(), spanName)
+	otelSpan.SetAttributes(attribute.String("input", serializeValue(inputData)))
+	value, _ := inputData["value"].(float64)
+	output := map[string]any{
+		"result":    value * 2,
+		"processed": true,
+	}
+	otelSpan.SetAttributes(attribute.String("output", serializeValue(output)))
+	otelSpan.SetStatus(codes.Ok, "")
+	otelSpan.End()
 	if output["result"] != 84.0 {
 		t.Errorf("Expected result 84.0, got %v", output["result"])
 	}
@@ -393,29 +390,24 @@ func TestIntegration_SpanStatusCode(t *testing.T) {
 	cleanup := setupTracingTest(t, serverURL, apiKey, 1.0)
 	defer cleanup()
 
-	// Create a function that succeeds
-	successfulFunction := func() string {
-		return "success"
-	}
-	tracedSuccess := WithTracing(successfulFunction, TracingOptions{
-		Name: fmt.Sprintf("test_success_%s", testMarker),
-	}).(func() string)
-
-	// Create a function that returns an error (should have ERROR status)
-	errorFunction := func() (string, error) {
-		return "", fmt.Errorf("test error")
-	}
-	tracedError := WithTracing(errorFunction, TracingOptions{
-		Name: fmt.Sprintf("test_error_%s", testMarker),
-	}).(func() (string, error))
-
-	// Call successful function
-	if tracedSuccess() != "success" {
+	// Create success span
+	successName := fmt.Sprintf("test_success_%s", testMarker)
+	_, successOtelSpan := otel.Tracer(AIQATracerName).Start(context.Background(), successName)
+	successResult := "success"
+	successOtelSpan.SetAttributes(attribute.String("output", serializeValue(successResult)))
+	successOtelSpan.SetStatus(codes.Ok, "")
+	successOtelSpan.End()
+	if successResult != "success" {
 		t.Error("successfulFunction() should return 'success'")
 	}
 
-	// Call error function (should return error)
-	_, err := tracedError()
+	// Create error span
+	errorName := fmt.Sprintf("test_error_%s", testMarker)
+	_, errorOtelSpan := otel.Tracer(AIQATracerName).Start(context.Background(), errorName)
+	err := fmt.Errorf("test error")
+	errorOtelSpan.RecordError(err)
+	errorOtelSpan.SetStatus(codes.Error, err.Error())
+	errorOtelSpan.End()
 	if err == nil {
 		t.Error("errorFunction() should return an error")
 	}

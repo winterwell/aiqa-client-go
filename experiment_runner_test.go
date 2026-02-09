@@ -274,7 +274,7 @@ func TestExperimentStruct(t *testing.T) {
 			"param1": "value1",
 		},
 		Results: []Result{
-			{ExampleId: "example1", Scores: map[string]float64{"score": 0.5}},
+			{Example: "example1", Scores: map[string]float64{"score": 0.5}},
 		},
 	}
 
@@ -288,7 +288,7 @@ func TestExperimentStruct(t *testing.T) {
 
 func TestResultStruct(t *testing.T) {
 	result := Result{
-		ExampleId: "test-example",
+		Example: "test-example",
 		Scores: map[string]float64{
 			"score1": 0.5,
 			"score2": 0.8,
@@ -298,8 +298,8 @@ func TestResultStruct(t *testing.T) {
 		},
 	}
 
-	if result.ExampleId != "test-example" {
-		t.Errorf("Expected ExampleId to be 'test-example', got '%s'", result.ExampleId)
+	if result.Example != "test-example" {
+		t.Errorf("Expected Example to be 'test-example', got '%s'", result.Example)
 	}
 	if len(result.Scores) != 2 {
 		t.Errorf("Expected 2 scores, got %d", len(result.Scores))

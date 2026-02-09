@@ -36,6 +36,10 @@ type ExperimentRunnerOptions struct {
 	LlmCallFn LLMCallFn
 	// ScorerForMetricId optional: map metric id -> scorer; used in RunExample when scoring metrics. If nil, no per-metric scoring.
 	ScorerForMetricId map[string]ScorerForMetricFn
+	// False by default. If true, Run and RunSome will re-run examples (once) if they do not have a score for each metric.
+	// This is useful if run-example hit a transient error.
+	// It can be wasteful if the error is permanent.
+	RerunExamplesWithMissingScores bool
 }
 
 // Example represents an example from a dataset
@@ -125,16 +129,17 @@ type MetricStats struct {
 // It can create an experiment, run it, and score the results.
 // Handles setting up environment variables and passing parameters to the engine function.
 type ExperimentRunner struct {
-	datasetId         string
-	serverUrl         string
-	apiKey            string
-	organisation      string
-	experimentId      string
-	experiment        *Experiment
-	datasetCache      *Dataset
-	llmCallFn         LLMCallFn
-	scorerForMetricId map[string]ScorerForMetricFn
-	summaryResults    map[string]MetricStats
+	datasetId                      string
+	serverUrl                      string
+	apiKey                         string
+	organisation                   string
+	experimentId                   string
+	experiment                     *Experiment
+	datasetCache                   *Dataset
+	llmCallFn                      LLMCallFn
+	scorerForMetricId              map[string]ScorerForMetricFn
+	summaryResults                 map[string]MetricStats
+	rerunExamplesWithMissingScores bool
 }
 
 // CallMyCode is how the experiment runner calls the engine function,
@@ -167,14 +172,15 @@ func NewExperimentRunner(options ExperimentRunnerOptions) *ExperimentRunner {
 	}
 
 	return &ExperimentRunner{
-		datasetId:         options.DatasetId,
-		serverUrl:         serverUrl,
-		apiKey:            apiKey,
-		organisation:      options.OrganisationId,
-		experimentId:      options.ExperimentId,
-		llmCallFn:         options.LlmCallFn,
-		scorerForMetricId: options.ScorerForMetricId,
-		summaryResults:    make(map[string]MetricStats),
+		datasetId:                      options.DatasetId,
+		serverUrl:                      serverUrl,
+		apiKey:                         apiKey,
+		organisation:                   options.OrganisationId,
+		experimentId:                   options.ExperimentId,
+		llmCallFn:                      options.LlmCallFn,
+		scorerForMetricId:              options.ScorerForMetricId,
+		summaryResults:                 make(map[string]MetricStats),
+		rerunExamplesWithMissingScores: options.RerunExamplesWithMissingScores || false,
 	}
 }
 
@@ -455,20 +461,56 @@ func (er *ExperimentRunner) RunSomeExamples(ctx context.Context, engine func(ctx
 	}
 	// If limit is set, limit the number of examples
 	if limit > 0 {
-		examples = examples[:limit]
+		if limit < len(examples) {
+			examples = examples[:limit]
+		}
+	}
+	var dataset *Dataset
+	if er.rerunExamplesWithMissingScores {
+		dataset, err = er.GetDataset(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get dataset for score completeness checks: %w", err)
+		}
 	}
 	// Build a map of existing results by example ID for quick lookup
-	existingResults := make(map[string]bool)
+	existingResults := make(map[string]Result)
 	if er.experiment != nil && er.experiment.Results != nil {
 		for _, result := range er.experiment.Results {
-			existingResults[result.Example] = true
+			existingResults[result.Example] = result
 		}
 	}
 	// filter out examples that have results already
 	doneCnt := 0
 	notDoneExamples := make([]Example, 0, len(examples))
 	for _, example := range examples {
-		if existingResults[example.Id] {
+		existingResult, hasExistingResult := existingResults[example.Id]
+		if hasExistingResult {
+			if er.rerunExamplesWithMissingScores {
+				// Does it have all the scores?
+				metrics := getMetricsForExample(dataset, example)
+				hasAllScores := true
+				for _, metric := range metrics {
+					metricId := metric.Id
+					if metricId == "" {
+						metricId = metric.Name
+					}
+					if metricId == "" {
+						continue
+					}
+					if _, ok := existingResult.Scores[metricId]; !ok {
+						hasAllScores = false
+						fmt.Printf("AIQA: Example %s is missing score for metric %s\n", example.Id, metricId)
+						break
+					}
+				}
+				if !hasAllScores {
+					notDoneExamples = append(notDoneExamples, example)
+					continue
+				}
+				// already done - skip it here
+				fmt.Printf("AIQA: Example %s has all scores :) - skipping\n", example.Id)
+			}
+			// already done - skip it here
 			doneCnt++
 		} else {
 			notDoneExamples = append(notDoneExamples, example)
@@ -676,6 +718,17 @@ func (er *ExperimentRunner) runExampleWithParameters(
 	return remoteResult, nil
 }
 
+func getMetricsForExample(dataset *Dataset, example Example) []Metric {
+	metrics := []Metric{}
+	if dataset != nil && len(dataset.Metrics) > 0 {
+		metrics = append(metrics, dataset.Metrics...)
+	}
+	if len(example.Metrics) > 0 {
+		metrics = append(metrics, example.Metrics...)
+	}
+	return metrics
+}
+
 // Run local scoring functions (the server might run more later, depending on where LLM keys are setup)
 func (er *ExperimentRunner) scoreExampleOutputLocal(ctx context.Context, example Example, input any, output any, parameters map[string]any) (map[string]float64, error) {
 	scores := make(map[string]float64)
@@ -684,13 +737,7 @@ func (er *ExperimentRunner) scoreExampleOutputLocal(ctx context.Context, example
 	if err != nil {
 		return nil, fmt.Errorf("get dataset for metrics: %w", err)
 	}
-	metrics := []Metric{}
-	if len(dataset.Metrics) > 0 {
-		metrics = append(metrics, dataset.Metrics...)
-	}
-	if len(example.Metrics) > 0 {
-		metrics = append(metrics, example.Metrics...)
-	}
+	metrics := getMetricsForExample(dataset, example)
 	// loop over metrics and score them
 	for _, metric := range metrics {
 		metricId := metric.Id
